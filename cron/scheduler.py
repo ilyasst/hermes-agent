@@ -1021,12 +1021,14 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         # Run the agent with an *inactivity*-based timeout: the job can run
         # for hours if it's actively calling tools / receiving stream tokens,
         # but a hung API call or stuck tool with no activity for the configured
-        # duration is caught and killed.  Default 600s (10 min inactivity);
-        # override via HERMES_CRON_TIMEOUT env var.  0 = unlimited.
+        # duration is caught and killed.  Per-job "timeout" field takes
+        # precedence, then HERMES_CRON_TIMEOUT env var, then 10-minute default.
+        # 0 = unlimited.
         #
         # Uses the agent's built-in activity tracker (updated by
         # _touch_activity() on every tool call, API call, and stream delta).
-        _cron_timeout = float(os.getenv("HERMES_CRON_TIMEOUT", 600))
+        _default_timeout = float(os.getenv("HERMES_CRON_TIMEOUT", 600))
+        _cron_timeout = float(job.get("timeout", _default_timeout))
         _cron_inactivity_limit = _cron_timeout if _cron_timeout > 0 else None
         _POLL_INTERVAL = 5.0
         _cron_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)

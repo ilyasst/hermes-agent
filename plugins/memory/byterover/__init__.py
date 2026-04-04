@@ -32,8 +32,10 @@ from tools.registry import tool_error
 logger = logging.getLogger(__name__)
 
 # Timeouts
-_QUERY_TIMEOUT = 10   # brv query — should be fast
-_CURATE_TIMEOUT = 120  # brv curate — may involve LLM processing
+# [LOCAL MOD] Increased from 10/120 to 60/300 for local LLM backends
+# routed through caproute. Curation is async (non-blocking). 2026-04-04.
+_QUERY_TIMEOUT = 60
+_CURATE_TIMEOUT = 300
 
 # Minimum lengths to filter noise
 _MIN_QUERY_LEN = 10

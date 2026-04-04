@@ -1016,6 +1016,11 @@ class TelegramAdapter(BasePlatformAdapter):
                 _TimedOut = None  # type: ignore[assignment,misc]
 
             for i, chunk in enumerate(chunks):
+                # [LOCAL MOD] Delay between chunks to avoid Telegram flood control.
+                # Without this, multi-chunk responses trigger RetryAfter errors
+                # with escalating wait times (9s → 23s → 39s). See 2026-04-04 session.
+                if i > 0:
+                    await asyncio.sleep(1.5)
                 should_thread = self._should_thread_reply(reply_to, i)
                 reply_to_id = int(reply_to) if should_thread else None
                 effective_thread_id = self._message_thread_id_for_send(thread_id)
