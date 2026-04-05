@@ -8084,27 +8084,6 @@ class AIAgent:
         if todo_snapshot:
             compressed.append({"role": "user", "content": todo_snapshot})
 
-        # [LOCAL MOD] Inject last user request as a task anchor so the agent
-        # remembers what it was working on after compression. Without this,
-        # the agent "forgets" its current task and starts from scratch.
-        # Added 2026-04-04 to address post-compaction amnesia.
-        if not todo_snapshot:
-            _last_user_msg = None
-            for msg in reversed(messages):
-                if msg.get("role") == "user" and msg.get("content"):
-                    content = msg["content"]
-                    if isinstance(content, str) and len(content.strip()) > 10:
-                        _last_user_msg = content.strip()
-                        break
-            if _last_user_msg:
-                # Truncate to avoid bloating the compressed context
-                if len(_last_user_msg) > 500:
-                    _last_user_msg = _last_user_msg[:500] + "..."
-                compressed.append({
-                    "role": "user",
-                    "content": f"[TASK ANCHOR — last request before context compression]\n{_last_user_msg}\n\n[Continue working on this. Check the context summary above for progress so far.]",
-                })
-
         self._invalidate_system_prompt()
         new_system_prompt = self._build_system_prompt(system_message)
         self._cached_system_prompt = new_system_prompt

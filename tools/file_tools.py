@@ -923,9 +923,11 @@ PATCH_SCHEMA = {
     }
 }
 
+# [LOCAL MOD 2026-04-05] Made search_files description much more explicit about target='content' vs target='files' modes.
+# Agent was using target='content' by default and searching for filename patterns like 'run_agent\.py' which returned 0 results.
 SEARCH_FILES_SCHEMA = {
     "name": "search_files",
-    "description": "Search file contents or find files by name. Use this instead of grep/rg/find/ls in terminal. Ripgrep-backed, faster than shell equivalents.\n\nContent search (target='content'): Regex search inside files. Output modes: full matches with line numbers, file paths only, or match counts.\n\nFile search (target='files'): Find files by glob pattern (e.g., '*.py', '*config*'). Also use this instead of ls — results sorted by modification time.",
+    "description": "Search file CONTENTS (regex) OR find files by NAME (glob). Ripgrep-backed.\n\n⚠️ IMPORTANT: This tool has TWO distinct modes controlled by the `target` parameter:\n\n**target='content' (DEFAULT)**: Searches INSIDE files for text matches using regex.\n  - Use for: 'find all usages of function X', 'grep for error messages', 'locate TODO comments'\n  - `pattern` is a regex matched against file contents\n  - Returns matching lines with line numbers\n\n**target='files'**: Finds FILES by their names/paths using glob patterns.\n  - Use for: 'find run_agent.py', 'list all .py files', 'locate config files'\n  - `pattern` is a glob pattern matched against filenames (e.g., '*.py', '*run_agent*', 'config.*')\n  - ⚠️ A filename regex like 'run_agent\\\\.py' as content search returns ZERO results (it searches inside files for that string)\n  - Use plain glob patterns: 'run_agent.py' or '*run_agent*' not '\\\\.py$'\n\nIf looking for a FILE by name, you MUST set target='files'. Otherwise you'll search file contents for that pattern and likely get nothing.",
     "parameters": {
         "type": "object",
         "properties": {
