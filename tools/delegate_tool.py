@@ -2297,75 +2297,26 @@ def _load_config() -> dict:
 DELEGATE_TASK_SCHEMA = {
     "name": "delegate_task",
     "description": (
-        "Spawn one or more subagents to work on tasks in isolated contexts. "
-        "Each subagent gets its own conversation, terminal session, and toolset. "
-        "Only the final summary is returned -- intermediate tool results "
-        "never enter your context window.\n\n"
-        "**STRONGLY PREFER delegation for file exploration and data gathering.** "
-        "Your context window is precious. Subagents use faster, smaller models "
-        "that handle mechanical tasks in seconds — don't waste your thinking "
-        "capacity on reading files and parsing output.\n\n"
-        "TWO MODES (one of 'goal' or 'tasks' is required):\n"
-        "1. Single task: provide 'goal' (+ optional context, toolsets)\n"
-        "2. Batch (parallel): provide 'tasks' array with up to delegation.max_concurrent_children items (default 3, configurable via config.yaml, no hard ceiling). "
-        "All run concurrently and results are returned together. Nested delegation requires role='orchestrator' and delegation.max_spawn_depth >= 2.\n\n"
-        "WHEN TO USE delegate_task (be liberal with this):\n"
-        "- **Reading large files** to find specific info (e.g. 'read drafter.py and list all functions')\n"
-        "- **Searching codebases** (grep/find patterns, exploration)\n"
-        "- **Summarizing logs or outputs** (extract errors, stats, patterns)\n"
-        "- **Multi-file code review** (delegate one file per subagent in batch mode)\n"
-        "- **Research synthesis** (gather info from multiple sources)\n"
-        "- **Parallel independent workstreams** (research A and B simultaneously)\n"
-        "- Any task that would require 3+ tool calls to gather data before answering\n\n"
-        "WHEN NOT TO USE (use these instead):\n"
-        "- Mechanical multi-step work with no reasoning needed -> use execute_code\n"
-        "- Single tool call with a small result -> just call the tool directly\n"
-        "- Tasks needing user interaction -> subagents cannot use clarify\n"
-        "- You already have the info in your context -> just answer\n\n"
-        "IMPORTANT:\n"
-        "- Subagents have NO memory of your conversation. Pass all relevant "
-        "info (file paths, error messages, constraints) via the 'context' field.\n"
-        "- Leaf subagents (role='leaf', the default) CANNOT call: "
-        "delegate_task, clarify, memory, send_message, execute_code.\n"
-        "- Orchestrator subagents (role='orchestrator') retain "
-        "delegate_task so they can spawn their own workers, but still "
-        "cannot use clarify, memory, send_message, or execute_code. "
-        "Orchestrators are bounded by delegation.max_spawn_depth "
-        "(default 2) and can be disabled globally via "
-        "delegation.orchestrator_enabled=false.\n"
-        "- Each subagent gets its own terminal session (separate working directory and state).\n"
-        "- Results are always returned as an array, one entry per task."
+        "Spawn subagent(s) to handle data-gathering in isolated contexts; only "
+        "their final summary returns, intermediate tool output never enters your "
+        "context. Use liberally for tasks needing 3+ tool calls (file reads, "
+        "greps, log summaries, multi-file review, research) — preserve your "
+        "thinking budget for reasoning, not parsing.\n\n"
+        "Modes: single task via 'goal' (+ 'context', 'toolsets'); or batch via "
+        "'tasks' array (≤3, run in parallel, returned as array).\n\n"
+        "Subagents have no memory of your conversation — pass all needed info "
+        "(paths, errors, constraints) via 'context'. They cannot call: "
+        "delegate_task, clarify, memory, send_message, execute_code."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "goal": {
-                "type": "string",
-                "description": (
-                    "What the subagent should accomplish. Be specific and "
-                    "self-contained -- the subagent knows nothing about your "
-                    "conversation history."
-                ),
-            },
-            "context": {
-                "type": "string",
-                "description": (
-                    "Background information the subagent needs: file paths, "
-                    "error messages, project structure, constraints. The more "
-                    "specific you are, the better the subagent performs."
-                ),
-            },
+            "goal": {"type": "string", "description": "Specific, self-contained task for the subagent."},
+            "context": {"type": "string", "description": "Background the subagent needs: paths, errors, constraints."},
             "toolsets": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": (
-                    "Toolsets to enable for this subagent. "
-                    "Default: inherits your enabled toolsets. "
-                    f"Available toolsets: {_TOOLSET_LIST_STR}. "
-                    "Common patterns: ['terminal', 'file'] for code work, "
-                    "['web'] for research, ['browser'] for web interaction, "
-                    "['terminal', 'file', 'web'] for full-stack tasks."
-                ),
+                "description": f"Toolsets for this subagent; defaults to yours. Available: {_TOOLSET_LIST_STR}. E.g. ['terminal','file'].",
             },
             "tasks": {
                 "type": "array",
@@ -2399,14 +2350,7 @@ DELEGATE_TASK_SCHEMA = {
                     },
                     "required": ["goal"],
                 },
-                # No maxItems — the runtime limit is configurable via
-                # delegation.max_concurrent_children (default 3) and
-                # enforced with a clear error in delegate_task().
-                "description": (
-                    "Batch mode: tasks to run in parallel (limit configurable via delegation.max_concurrent_children, default 3). Each gets "
-                    "its own subagent with isolated context and terminal session. "
-                    "When provided, top-level goal/context/toolsets are ignored."
-                ),
+                "description": "Batch mode: parallel tasks (limit via delegation.max_concurrent_children, default 3). Overrides top-level goal/context/toolsets.",
             },
             "role": {
                 "type": "string",
@@ -2438,6 +2382,7 @@ DELEGATE_TASK_SCHEMA = {
                     "Only used when acp_command is set. Example: ['--acp', '--stdio', '--model', 'claude-opus-4-6']"
                 ),
             },
+            "max_iterations": {"type": "integer", "description": "Max turns per subagent (default 50)."},
         },
         "required": [],
     },

@@ -209,54 +209,28 @@ def check_todo_requirements() -> bool:
 TODO_SCHEMA = {
     "name": "todo",
     "description": (
-        "Manage your task list for the current session. Use for complex tasks "
-        "with 3+ steps or when the user provides multiple tasks. "
-        "Call with no parameters to read the current list.\n\n"
-        "Writing:\n"
-        "- Provide 'todos' array to create/update items\n"
-        "- merge=false (default): replace the entire list with a fresh plan\n"
-        "- merge=true: update existing items by id, add any new ones\n\n"
-        "Each item: {id: string, content: string, "
-        "status: pending|in_progress|completed|cancelled}\n"
-        "List order is priority. Only ONE item in_progress at a time.\n"
-        "Mark items completed immediately when done. If something fails, "
-        "cancel it and add a revised item.\n\n"
-        "Always returns the full current list."
+        "Session task list. No args → read. Provide 'todos' to write. "
+        "List order = priority. Only ONE in_progress at a time; mark items "
+        "completed immediately when done. merge=false (default) replaces the "
+        "whole list; merge=true updates by id and adds new."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "todos": {
                 "type": "array",
-                "description": "Task items to write. Omit to read current list.",
+                "description": "Items to write; omit to read.",
                 "items": {
                     "type": "object",
                     "properties": {
-                        "id": {
-                            "type": "string",
-                            "description": "Unique item identifier"
-                        },
-                        "content": {
-                            "type": "string",
-                            "description": "Task description"
-                        },
-                        "status": {
-                            "type": "string",
-                            "enum": ["pending", "in_progress", "completed", "cancelled"],
-                            "description": "Current status"
-                        }
+                        "id": {"type": "string"},
+                        "content": {"type": "string"},
+                        "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "cancelled"]}
                     },
                     "required": ["id", "content", "status"]
                 }
             },
-            "merge": {
-                "type": "boolean",
-                "description": (
-                    "true: update existing items by id, add new ones. "
-                    "false (default): replace the entire list."
-                ),
-                "default": False
-            }
+            "merge": {"type": "boolean", "default": False}
         },
         "required": []
     }

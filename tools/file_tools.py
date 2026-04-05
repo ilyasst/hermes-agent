@@ -927,18 +927,18 @@ PATCH_SCHEMA = {
 # Agent was using target='content' by default and searching for filename patterns like 'run_agent\.py' which returned 0 results.
 SEARCH_FILES_SCHEMA = {
     "name": "search_files",
-    "description": "Search file CONTENTS (regex) OR find files by NAME (glob). Ripgrep-backed.\n\n⚠️ IMPORTANT: This tool has TWO distinct modes controlled by the `target` parameter:\n\n**target='content' (DEFAULT)**: Searches INSIDE files for text matches using regex.\n  - Use for: 'find all usages of function X', 'grep for error messages', 'locate TODO comments'\n  - `pattern` is a regex matched against file contents\n  - Returns matching lines with line numbers\n\n**target='files'**: Finds FILES by their names/paths using glob patterns.\n  - Use for: 'find run_agent.py', 'list all .py files', 'locate config files'\n  - `pattern` is a glob pattern matched against filenames (e.g., '*.py', '*run_agent*', 'config.*')\n  - ⚠️ A filename regex like 'run_agent\\\\.py' as content search returns ZERO results (it searches inside files for that string)\n  - Use plain glob patterns: 'run_agent.py' or '*run_agent*' not '\\\\.py$'\n\nIf looking for a FILE by name, you MUST set target='files'. Otherwise you'll search file contents for that pattern and likely get nothing.",
+    "description": "Ripgrep-backed search with TWO modes via `target`:\n- target='content' (default): regex inside file contents. Pattern is regex.\n- target='files': find files by name. Pattern is a GLOB (e.g. '*.py', '*run_agent*').\nIf you want to find a file by name, YOU MUST set target='files' — a filename regex in content mode returns zero results.",
     "parameters": {
         "type": "object",
         "properties": {
-            "pattern": {"type": "string", "description": "Regex pattern for content search, or glob pattern (e.g., '*.py') for file search"},
-            "target": {"type": "string", "enum": ["content", "files"], "description": "'content' searches inside file contents, 'files' searches for files by name", "default": "content"},
-            "path": {"type": "string", "description": "Directory or file to search in (default: current working directory)", "default": "."},
-            "file_glob": {"type": "string", "description": "Filter files by pattern in grep mode (e.g., '*.py' to only search Python files)"},
-            "limit": {"type": "integer", "description": "Maximum number of results to return (default: 50)", "default": 50},
-            "offset": {"type": "integer", "description": "Skip first N results for pagination (default: 0)", "default": 0},
-            "output_mode": {"type": "string", "enum": ["content", "files_only", "count"], "description": "Output format for grep mode: 'content' shows matching lines with line numbers, 'files_only' lists file paths, 'count' shows match counts per file", "default": "content"},
-            "context": {"type": "integer", "description": "Number of context lines before and after each match (grep mode only)", "default": 0}
+            "pattern": {"type": "string", "description": "Regex (content) or glob (files)."},
+            "target": {"type": "string", "enum": ["content", "files"], "default": "content"},
+            "path": {"type": "string", "description": "Dir or file to search (default cwd).", "default": "."},
+            "file_glob": {"type": "string", "description": "Filter files in content mode (e.g. '*.py')."},
+            "limit": {"type": "integer", "default": 50},
+            "offset": {"type": "integer", "default": 0},
+            "output_mode": {"type": "string", "enum": ["content", "files_only", "count"], "description": "content-mode output format.", "default": "content"},
+            "context": {"type": "integer", "description": "Context lines around matches.", "default": 0}
         },
         "required": ["pattern"]
     }

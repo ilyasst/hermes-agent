@@ -528,44 +528,20 @@ def check_session_search_requirements() -> bool:
 SESSION_SEARCH_SCHEMA = {
     "name": "session_search",
     "description": (
-        "Search your long-term memory of past conversations, or browse recent sessions. This is your recall -- "
-        "every past session is searchable, and this tool summarizes what happened.\n\n"
-        "TWO MODES:\n"
-        "1. Recent sessions (no query): Call with no arguments to see what was worked on recently. "
-        "Returns titles, previews, and timestamps. Zero LLM cost, instant. "
-        "Start here when the user asks what were we working on or what did we do recently.\n"
-        "2. Keyword search (with query): Search for specific topics across all past sessions. "
-        "Returns LLM-generated summaries of matching sessions.\n\n"
-        "USE THIS PROACTIVELY when:\n"
-        "- The user says 'we did this before', 'remember when', 'last time', 'as I mentioned'\n"
-        "- The user asks about a topic you worked on before but don't have in current context\n"
-        "- The user references a project, person, or concept that seems familiar but isn't in memory\n"
-        "- You want to check if you've solved a similar problem before\n"
-        "- The user asks 'what did we do about X?' or 'how did we fix Y?'\n\n"
-        "Don't hesitate to search when it is actually cross-session -- it's fast and cheap. "
-        "Better to search and confirm than to guess or ask the user to repeat themselves.\n\n"
-        "Search syntax: keywords joined with OR for broad recall (elevenlabs OR baseten OR funding), "
-        "phrases for exact match (\"docker networking\"), boolean (python NOT java), prefix (deploy*). "
-        "IMPORTANT: Use OR between keywords for best results — FTS5 defaults to AND which misses "
-        "sessions that only mention some terms. If a broad OR query returns nothing, try individual "
-        "keyword searches in parallel. Returns summaries of the top matching sessions."
+        "Recall past conversations via FTS5 search across session transcripts. "
+        "No query → browse recent sessions (instant, no LLM). With query → "
+        "LLM-summarize matching sessions. Use when user says 'last time', "
+        "'remember when', or references prior work not in current context. "
+        "Syntax: OR between keywords for broad recall (FTS5 defaults to AND "
+        "which misses partial matches), quotes for phrases, NOT for exclusion, "
+        "prefix* for stems."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "query": {
-                "type": "string",
-                "description": "Search query — keywords, phrases, or boolean expressions to find in past sessions. Omit this parameter entirely to browse recent sessions instead (returns titles, previews, timestamps with no LLM cost).",
-            },
-            "role_filter": {
-                "type": "string",
-                "description": "Optional: only search messages from specific roles (comma-separated). E.g. 'user,assistant' to skip tool outputs.",
-            },
-            "limit": {
-                "type": "integer",
-                "description": "Max sessions to summarize (default: 3, max: 5).",
-                "default": 3,
-            },
+            "query": {"type": "string", "description": "Keywords/phrases/boolean. Omit to browse recent."},
+            "role_filter": {"type": "string", "description": "Comma-separated roles, e.g. 'user,assistant'."},
+            "limit": {"type": "integer", "description": "Max sessions to summarize (default 3, max 5).", "default": 3},
         },
         "required": [],
     },
