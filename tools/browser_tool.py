@@ -978,6 +978,57 @@ BROWSER_TOOL_SCHEMAS = [
             "required": []
         }
     },
+    {
+        "name": "browser_tab_list",
+        "description": "List all open tabs in the browser session. Returns tab IDs, titles, URLs, and which tab is currently active. Use this to understand what tabs are open before switching or closing tabs. Requires browser_navigate to be called first.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "name": "browser_tab_new",
+        "description": "Open a new browser tab and optionally navigate to a URL. Returns the new tab ID. If no URL is provided, opens a blank tab. The new tab becomes the active tab. Requires browser_navigate to be called first.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "Optional URL to navigate to in the new tab (e.g., 'https://example.com'). If not provided, opens a blank tab."
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "browser_tab_switch",
+        "description": "Switch to a different tab by its tab ID. Makes the specified tab the active tab. Use browser_tab_list first to get available tab IDs. Requires browser_navigate to be called first.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "tab_id": {
+                    "type": "string",
+                    "description": "The ID of the tab to switch to (obtained from browser_tab_list)"
+                }
+            },
+            "required": ["tab_id"]
+        }
+    },
+    {
+        "name": "browser_tab_close",
+        "description": "Close a specific tab by its tab ID. Cannot close the last remaining tab. After closing, automatically switches to another open tab. Use browser_tab_list first to get available tab IDs. Requires browser_navigate to be called first.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "tab_id": {
+                    "type": "string",
+                    "description": "The ID of the tab to close (obtained from browser_tab_list)"
+                }
+            },
+            "required": ["tab_id"]
+        }
+    },
 ]
 
 
@@ -2013,6 +2064,143 @@ def _camofox_eval(expression: str, task_id: Optional[str] = None) -> str:
             })
         return tool_error(error_msg, success=False)
 
+def browser_tab_list(task_id: Optional[str] = None) -> str:
+    """List all open tabs in the browser session.
+    
+    Returns tab IDs, titles, URLs, and which tab is currently active.
+    Use this to understand what tabs are open before switching or closing tabs.
+    
+    Args:
+        task_id: Task identifier for session isolation
+        
+    Returns:
+        JSON string with list of tabs
+    """
+    if _is_camofox_mode():
+        from tools.browser_camofox import camofox_tab_list
+        return camofox_tab_list(task_id)
+    
+    effective_task_id = task_id or "default"
+    result = _run_browser_command(effective_task_id, "tab", ["list"])
+    
+    if result.get("success"):
+        tabs = result.get("data", {}).get("tabs", [])
+        return json.dumps({
+            "success": True,
+            "tabs": tabs,
+            "count": len(tabs)
+        }, ensure_ascii=False)
+    else:
+        return json.dumps({
+            "success": False,
+            "error": result.get("error", "Failed to list tabs")
+        }, ensure_ascii=False)
+
+
+def browser_tab_new(url: str = None, task_id: Optional[str] = None) -> str:
+    """Open a new browser tab and optionally navigate to a URL.
+    
+    Returns the new tab ID. If no URL is provided, opens a blank tab.
+    The new tab becomes the active tab.
+    
+    Args:
+        url: Optional URL to navigate to in the new tab
+        task_id: Task identifier for session isolation
+        
+    Returns:
+        JSON string with the new tab ID
+    """
+    if _is_camofox_mode():
+        from tools.browser_camofox import camofox_tab_new
+        return camofox_tab_new(url, task_id)
+    
+    effective_task_id = task_id or "default"
+    args = ["new"]
+    if url:
+        args.extend(["--url", url])
+    
+    result = _run_browser_command(effective_task_id, "tab", args)
+    
+    if result.get("success"):
+        tab_id = result.get("data", {}).get("tabId")
+        return json.dumps({
+            "success": True,
+            "tab_id": tab_id,
+            "url": url or "about:blank"
+        }, ensure_ascii=False)
+    else:
+        return json.dumps({
+            "success": False,
+            "error": result.get("error", "Failed to create new tab")
+        }, ensure_ascii=False)
+
+
+def browser_tab_switch(tab_id: str, task_id: Optional[str] = None) -> str:
+    """Switch to a different tab by its tab ID.
+    
+    Makes the specified tab the active tab. Use browser_tab_list first
+    to get available tab IDs.
+    
+    Args:
+        tab_id: The ID of the tab to switch to
+        task_id: Task identifier for session isolation
+        
+    Returns:
+        JSON string confirming the switch
+    """
+    if _is_camofox_mode():
+        from tools.browser_camofox import camofox_tab_switch
+        return camofox_tab_switch(tab_id, task_id)
+    
+    effective_task_id = task_id or "default"
+    result = _run_browser_command(effective_task_id, "tab", ["switch", "--tabId", str(tab_id)])
+    
+    if result.get("success"):
+        return json.dumps({
+            "success": True,
+            "tab_id": tab_id,
+            "message": f"Switched to tab {tab_id}"
+        }, ensure_ascii=False)
+    else:
+        return json.dumps({
+            "success": False,
+            "error": result.get("error", f"Failed to switch to tab {tab_id}")
+        }, ensure_ascii=False)
+
+
+def browser_tab_close(tab_id: str, task_id: Optional[str] = None) -> str:
+    """Close a specific tab by its tab ID.
+    
+    Cannot close the last remaining tab. After closing, automatically
+    switches to another open tab. Use browser_tab_list first to get
+    available tab IDs.
+    
+    Args:
+        tab_id: The ID of the tab to close
+        task_id: Task identifier for session isolation
+        
+    Returns:
+        JSON string confirming the closure
+    """
+    if _is_camofox_mode():
+        from tools.browser_camofox import camofox_tab_close
+        return camofox_tab_close(tab_id, task_id)
+    
+    effective_task_id = task_id or "default"
+    result = _run_browser_command(effective_task_id, "tab", ["close", "--tabId", str(tab_id)])
+    
+    if result.get("success"):
+        return json.dumps({
+            "success": True,
+            "tab_id": tab_id,
+            "message": f"Closed tab {tab_id}"
+        }, ensure_ascii=False)
+    else:
+        return json.dumps({
+            "success": False,
+            "error": result.get("error", f"Failed to close tab {tab_id}")
+        }, ensure_ascii=False)
+
 
 def _maybe_start_recording(task_id: str):
     """Start recording if browser.record_sessions is enabled in config."""
@@ -2634,4 +2822,36 @@ registry.register(
     handler=lambda args, **kw: browser_console(clear=args.get("clear", False), expression=args.get("expression"), task_id=kw.get("task_id")),
     check_fn=check_browser_requirements,
     emoji="🖥️",
+)
+registry.register(
+    name="browser_tab_list",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_tab_list"],
+    handler=lambda args, **kw: browser_tab_list(task_id=kw.get("task_id")),
+    check_fn=check_browser_requirements,
+    emoji="📑",
+)
+registry.register(
+    name="browser_tab_new",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_tab_new"],
+    handler=lambda args, **kw: browser_tab_new(url=args.get("url"), task_id=kw.get("task_id")),
+    check_fn=check_browser_requirements,
+    emoji="➕",
+)
+registry.register(
+    name="browser_tab_switch",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_tab_switch"],
+    handler=lambda args, **kw: browser_tab_switch(tab_id=args.get("tab_id", ""), task_id=kw.get("task_id")),
+    check_fn=check_browser_requirements,
+    emoji="🔀",
+)
+registry.register(
+    name="browser_tab_close",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_tab_close"],
+    handler=lambda args, **kw: browser_tab_close(tab_id=args.get("tab_id", ""), task_id=kw.get("task_id")),
+    check_fn=check_browser_requirements,
+    emoji="❌",
 )
