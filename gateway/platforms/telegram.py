@@ -638,6 +638,238 @@ class TelegramAdapter(BasePlatformAdapter):
                     # Persist thread_id to config so we don't recreate on next restart
                     self._persist_dm_topic_thread_id(int(chat_id), topic_name, thread_id)
 
+    # ─── distill_topics helpers (LOCAL PATCH) ─────────────────────────
+    # See internal deployment docs for the audio notes pipeline architecture
+    # These methods route voice/audio messages in configured (chat, thread)
+    # pairs to the local distill HTTP server instead of the Hermes agent.
+    # Patch is local-only — not in upstream NousResearch/hermes-agent.
+
+    def _match_distill_topic(self, message: "Message") -> Optional[Dict[str, Any]]:
+        """Return the distill_topics config entry that matches this message.
+
+        A match requires both chat_id and thread_id to line up. Returns the
+        full config dict (with at least 'protocol' and optionally 'distill_url',
+        'language', 'speakers', 'output_language') or None if no match.
+        """
+        topics = self.config.extra.get("distill_topics", [])
+        if not topics:
+            return None
+        try:
+            msg_chat_id = int(getattr(getattr(message, "chat", None), "id", 0))
+            msg_thread_id = getattr(message, "message_thread_id", None)
+            if msg_thread_id is None:
+                return None
+            msg_thread_id = int(msg_thread_id)
+        except (TypeError, ValueError):
+            return None
+        for entry in topics:
+            try:
+                if int(entry.get("chat_id", 0)) == msg_chat_id and int(
+                    entry.get("thread_id", 0)
+                ) == msg_thread_id:
+                    return entry
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    async def _dispatch_to_distill(
+        self,
+        *,
+        cached_audio_path: str,
+        chat_id: int,
+        thread_id: Optional[int],
+        reply_to_message_id: Optional[int],
+        config: Dict[str, Any],
+    ) -> None:
+        """POST audio to local distill server, poll for completion, post result.
+
+        Runs as an async background task — must not block the gateway poll loop.
+        Uses urllib (no extra deps) on a thread executor for the blocking HTTP
+        calls. distill jobs are expected to take 1–10 minutes for typical voice
+        notes; the polling loop runs until the job is done or 1h elapses.
+        """
+        import json as _json
+        import mimetypes
+        import urllib.request
+        import urllib.error
+
+        distill_url = config.get("distill_url", "http://localhost:8801").rstrip("/")
+        protocol_name = config.get("protocol", "meeting")
+
+        # Build query string from optional config knobs
+        query_parts = [f"protocol={protocol_name}"]
+        for key in ("language", "speakers", "output_language"):
+            if config.get(key) is not None:
+                query_parts.append(f"{key}={config[key]}")
+        query = "&".join(query_parts)
+
+        loop = asyncio.get_running_loop()
+
+        def _post_audio() -> Optional[str]:
+            """Submit the audio file to distill, return job_id or None."""
+            try:
+                file_bytes = _Path(cached_audio_path).read_bytes()
+                filename = _Path(cached_audio_path).name
+                mime, _ = mimetypes.guess_type(filename)
+                mime = mime or "audio/ogg"
+                # Hand-rolled multipart so we don't need 'requests'
+                boundary = "----distillpatch"
+                body = (
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+                    f"Content-Type: {mime}\r\n\r\n"
+                ).encode() + file_bytes + f"\r\n--{boundary}--\r\n".encode()
+                req = urllib.request.Request(
+                    f"{distill_url}/process?{query}",
+                    data=body,
+                    method="POST",
+                    headers={
+                        "Content-Type": f"multipart/form-data; boundary={boundary}",
+                        "Content-Length": str(len(body)),
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    data = _json.loads(resp.read())
+                    return data.get("id")
+            except Exception as exc:
+                logger.warning("[distill] POST failed: %s", exc, exc_info=True)
+                return None
+
+        def _poll_status(job_id: str) -> Optional[dict]:
+            """Poll /status/<id> until terminal, return final meta or None."""
+            import time
+            deadline = time.time() + 3600  # 1h hard cap
+            while time.time() < deadline:
+                try:
+                    with urllib.request.urlopen(
+                        f"{distill_url}/status/{job_id}", timeout=15
+                    ) as resp:
+                        meta = _json.loads(resp.read())
+                    status = meta.get("status")
+                    if status in ("done", "failed"):
+                        return meta
+                except Exception as exc:
+                    logger.warning("[distill] poll error: %s", exc)
+                time.sleep(10)
+            return None
+
+        def _fetch_result(job_id: str) -> Optional[dict]:
+            try:
+                with urllib.request.urlopen(
+                    f"{distill_url}/result/{job_id}", timeout=30
+                ) as resp:
+                    return _json.loads(resp.read())
+            except Exception as exc:
+                logger.warning("[distill] result fetch failed: %s", exc)
+                return None
+
+        # Acknowledge in the topic so the user knows we're on it
+        try:
+            await self._bot.send_message(
+                chat_id=chat_id,
+                text=f"📝 Distilling voice note (protocol: `{protocol_name}`)…",
+                message_thread_id=thread_id,
+                reply_to_message_id=reply_to_message_id,
+                parse_mode="Markdown",
+            )
+        except Exception as exc:
+            logger.warning("[distill] ack send failed: %s", exc)
+
+        job_id = await loop.run_in_executor(None, _post_audio)
+        if not job_id:
+            try:
+                await self._bot.send_message(
+                    chat_id=chat_id,
+                    text="❌ distill upload failed — see gateway logs.",
+                    message_thread_id=thread_id,
+                )
+            except Exception:
+                pass
+            return
+
+        logger.info("[distill] Submitted job %s, polling…", job_id)
+        meta = await loop.run_in_executor(None, _poll_status, job_id)
+        if meta is None:
+            await self._bot.send_message(
+                chat_id=chat_id,
+                text=f"⚠️ distill job `{job_id}` timed out after 1h.",
+                message_thread_id=thread_id,
+                parse_mode="Markdown",
+            )
+            return
+        if meta.get("status") != "done":
+            await self._bot.send_message(
+                chat_id=chat_id,
+                text=f"❌ distill job `{job_id}` failed: `{meta.get('error', 'unknown')}`",
+                message_thread_id=thread_id,
+                parse_mode="Markdown",
+            )
+            return
+
+        result = await loop.run_in_executor(None, _fetch_result, job_id)
+        if not result:
+            await self._bot.send_message(
+                chat_id=chat_id,
+                text=f"⚠️ distill job `{job_id}` done but result fetch failed.",
+                message_thread_id=thread_id,
+                parse_mode="Markdown",
+            )
+            return
+
+        # Find the .md file (the protocol output) and post it back
+        files = result.get("files", {})
+        md_name = next((n for n in files if n.endswith(".md")), None)
+        if not md_name:
+            await self._bot.send_message(
+                chat_id=chat_id,
+                text=f"⚠️ distill job `{job_id}` produced no .md output.",
+                message_thread_id=thread_id,
+                parse_mode="Markdown",
+            )
+            return
+        md_content = files[md_name]
+
+        # Telegram caps text messages at 4096 chars. For long protocols, send
+        # the full markdown as a document upload AND a short text excerpt.
+        TELEGRAM_TEXT_LIMIT = 3500  # leave headroom for headers/formatting
+        if len(md_content) <= TELEGRAM_TEXT_LIMIT:
+            try:
+                await self._bot.send_message(
+                    chat_id=chat_id,
+                    text=md_content,
+                    message_thread_id=thread_id,
+                    parse_mode="Markdown",
+                )
+            except Exception as exc:
+                logger.warning("[distill] markdown send failed, retrying plain: %s", exc)
+                await self._bot.send_message(
+                    chat_id=chat_id,
+                    text=md_content,
+                    message_thread_id=thread_id,
+                )
+        else:
+            # Long protocol: upload as a document
+            import io
+            doc_bytes = md_content.encode("utf-8")
+            try:
+                await self._bot.send_document(
+                    chat_id=chat_id,
+                    document=io.BytesIO(doc_bytes),
+                    filename=md_name,
+                    caption=f"📝 distill protocol (`{protocol_name}`, job `{job_id}`)",
+                    message_thread_id=thread_id,
+                    parse_mode="Markdown",
+                )
+            except Exception as exc:
+                logger.warning("[distill] document upload failed: %s", exc)
+                # Last-resort: send the first chunk as plain text
+                excerpt = md_content[:TELEGRAM_TEXT_LIMIT]
+                await self._bot.send_message(
+                    chat_id=chat_id,
+                    text=excerpt + "\n\n(…truncated)",
+                    message_thread_id=thread_id,
+                )
+
     async def connect(self) -> bool:
         """Connect to Telegram via polling or webhook.
 
@@ -2681,6 +2913,55 @@ class TelegramAdapter(BasePlatformAdapter):
                 logger.info("[Telegram] Cached user video at %s", cached_path)
             except Exception as e:
                 logger.warning("[Telegram] Failed to cache video: %s", e, exc_info=True)
+
+        # ─── distill_topics routing (LOCAL PATCH, not upstream) ──────────
+        # If a voice/audio message lands in a chat+topic that's configured
+        # under platforms.telegram.extra.distill_topics, divert it to the
+        # local distill HTTP server (transcription + diarization + a custom
+        # protocol prompt) instead of dispatching to the Hermes agent.
+        #
+        # Why this exists: voice notes recorded in dedicated topics (e.g.
+        # "Audio Notes") should be processed by the distill pipeline with a
+        # specific protocol prompt — NOT transcribed-and-replied-to by the
+        # agent. This keeps the agent out of the loop for note-taking work
+        # and avoids burning fleet capacity on STT through the LLM path.
+        #
+        # Config shape (in Hermes config.yaml under platforms.telegram.extra):
+        #   distill_topics:
+        #     - chat_id: -1003515559340
+        #       thread_id: 1142
+        #       protocol: brain-dump
+        #       distill_url: http://localhost:8801   # optional, this is the default
+        #
+        # See internal deployment docs for the audio notes pipeline architecture
+        # for the full architecture and how to re-apply this patch after a
+        # `hermes update`.
+        if (msg.voice or msg.audio) and event.media_urls:
+            distill_match = self._match_distill_topic(msg)
+            if distill_match is not None:
+                cached_audio_path = event.media_urls[0]
+                logger.info(
+                    "[distill] Diverting voice/audio in chat=%s thread=%s to "
+                    "distill (protocol=%s)",
+                    msg.chat.id,
+                    msg.message_thread_id,
+                    distill_match.get("protocol", "meeting"),
+                )
+                # Fire-and-forget: distill jobs take minutes, do not block the
+                # gateway poll loop. The dispatch task replies in the same
+                # topic when the job is done.
+                asyncio.create_task(
+                    self._dispatch_to_distill(
+                        cached_audio_path=cached_audio_path,
+                        chat_id=msg.chat.id,
+                        thread_id=msg.message_thread_id,
+                        reply_to_message_id=msg.message_id,
+                        config=distill_match,
+                    )
+                )
+                # Short-circuit: do NOT call self.handle_message(event) for
+                # this audio. The agent never sees it.
+                return
 
         # Download document files to cache for agent processing
         elif msg.document:
