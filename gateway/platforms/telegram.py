@@ -829,6 +829,17 @@ class TelegramAdapter(BasePlatformAdapter):
             return
         md_content = files[md_name]
 
+        # ─── save to configured notes dir (LOCAL PATCH) ──────────────
+        # Persist the generated protocol to a configurable notes directory so voice
+        # notes end up in the knowledge base, not just the Telegram topic.
+        try:
+            kb_notes_dir = _Path(os.environ.get("HERMES_DISTILL_NOTES_DIR", str(_Path.home() / ".hermes" / "distill_notes")))
+            kb_notes_dir.mkdir(parents=True, exist_ok=True)
+            (kb_notes_dir / md_name).write_text(md_content, encoding="utf-8")
+            logger.info("[distill] Saved protocol to notes dir: %s", kb_notes_dir / md_name)
+        except Exception as exc:
+            logger.warning("[distill] KB save failed: %s", exc)
+
         # Telegram caps text messages at 4096 chars. For long protocols, send
         # the full markdown as a document upload AND a short text excerpt.
         TELEGRAM_TEXT_LIMIT = 3500  # leave headroom for headers/formatting
