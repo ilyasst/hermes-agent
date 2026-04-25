@@ -3739,10 +3739,15 @@ class GatewayRunner:
                     exec_cmd = qcmd.get("command", "")
                     if exec_cmd:
                         try:
+                            # [LOCAL MOD] Forward user-typed args to exec quick_commands
+                            # via HERMES_QUICK_ARGS so scripts can accept parameters
+                            # (e.g. /claude_rc squareone).
+                            _qc_env = {**os.environ, "HERMES_QUICK_ARGS": event.get_command_args().strip()}
                             proc = await asyncio.create_subprocess_shell(
                                 exec_cmd,
                                 stdout=asyncio.subprocess.PIPE,
                                 stderr=asyncio.subprocess.PIPE,
+                                env=_qc_env,
                             )
                             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
                             output = (stdout or stderr).decode().strip()
@@ -10404,6 +10409,7 @@ class GatewayRunner:
             _agent_warning_raw = float(os.getenv("HERMES_AGENT_TIMEOUT_WARNING", 900))
             _agent_warning = _agent_warning_raw if _agent_warning_raw > 0 else None
             _warning_fired = False
+            _executor_start = time.time()
             _executor_task = asyncio.ensure_future(
                 self._run_in_executor_with_context(run_sync)
             )
@@ -10444,6 +10450,13 @@ class GatewayRunner:
                 # Poll loop: check the agent's built-in activity tracker
                 # (updated by _touch_activity() on every tool call, API
                 # call, and stream delta) every few seconds.
+                #
+                # Floor the idle clock at _executor_start: on the first
+                # turn after a reused session, the agent's _last_activity_ts
+                # is stale (hours old from the previous exchange), which
+                # would fire the timeout immediately. Measuring from the
+                # later of (last activity, executor start) gives each new
+                # turn a fresh inactivity budget.
                 response = None
                 while True:
                     done, _ = await asyncio.wait(
@@ -10454,13 +10467,15 @@ class GatewayRunner:
                         break
                     # Agent still running — check inactivity.
                     _agent_ref = agent_holder[0]
-                    _idle_secs = 0.0
+                    _last_ts = 0.0
                     if _agent_ref and hasattr(_agent_ref, "get_activity_summary"):
                         try:
                             _act = _agent_ref.get_activity_summary()
-                            _idle_secs = _act.get("seconds_since_activity", 0.0)
+                            _last_ts = _act.get("last_activity_ts", 0.0)
                         except Exception:
                             pass
+                    _effective_baseline = max(_last_ts, _executor_start)
+                    _idle_secs = time.time() - _effective_baseline
                     # Staged warning: fire once before escalating to full timeout.
                     if (not _warning_fired and _agent_warning is not None
                             and _idle_secs >= _agent_warning):
