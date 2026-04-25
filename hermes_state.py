@@ -27,6 +27,48 @@ from typing import Any, Callable, Dict, List, Optional, TypeVar
 
 logger = logging.getLogger(__name__)
 
+
+# [LOCAL MOD] Tool-call sanitizer — prevents poisoned conversations.
+# The thinking model occasionally emits malformed tool_calls that llama-server's
+# jinja parser rejects with HTTP 500, killing the session on every replay.
+# Two known failure modes:
+#   1. type=None (should be "function") — emitted by some chat templates
+#   2. argument values wrapped as {"type":"X","value":Y} — schema-value confusion
+#      hallucination where the model copies the tool schema shape into its output
+# We sanitize on both write (append_message) and read (get_messages*) paths.
+def _sanitize_tool_calls(tool_calls):
+    """Repair malformed tool_calls in place. Returns (repaired_list, repair_count)."""
+    if not tool_calls or not isinstance(tool_calls, list):
+        return tool_calls, 0
+    repairs = 0
+    for tc in tool_calls:
+        if not isinstance(tc, dict):
+            continue
+        # Fix type=None → "function"
+        if tc.get("type") in (None, "null", ""):
+            tc["type"] = "function"
+            repairs += 1
+        # Flatten schema-value argument patterns: {"q": {"type":"string","value":X}} -> {"q": X}
+        fn = tc.get("function", {})
+        args_raw = fn.get("arguments")
+        if isinstance(args_raw, str):
+            try:
+                args = json.loads(args_raw)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(args, dict):
+                fixed = False
+                for k, v in list(args.items()):
+                    if (isinstance(v, dict)
+                            and set(v.keys()) == {"type", "value"}
+                            and isinstance(v.get("type"), str)):
+                        args[k] = v["value"]
+                        fixed = True
+                if fixed:
+                    fn["arguments"] = json.dumps(args)
+                    repairs += 1
+    return tool_calls, repairs
+
 T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
@@ -987,6 +1029,10 @@ class SessionDB:
             json.dumps(codex_message_items)
             if codex_message_items else None
         )
+        # [LOCAL MOD] Sanitize before persisting to prevent session poisoning.
+        tool_calls, _repairs = _sanitize_tool_calls(tool_calls)
+        if _repairs:
+            logger.warning("Sanitized %d malformed tool_call(s) on write for session %s", _repairs, session_id)
         tool_calls_json = json.dumps(tool_calls) if tool_calls else None
 
         # Pre-compute tool call count
@@ -1145,6 +1191,10 @@ class SessionDB:
             if row["tool_calls"]:
                 try:
                     msg["tool_calls"] = json.loads(row["tool_calls"])
+                    # [LOCAL MOD] Heal existing malformed tool_calls on read.
+                    msg["tool_calls"], _r = _sanitize_tool_calls(msg["tool_calls"])
+                    if _r:
+                        logger.warning("Sanitized %d malformed tool_call(s) on read", _r)
                 except (json.JSONDecodeError, TypeError):
                     logger.warning("Failed to deserialize tool_calls in conversation replay, falling back to []")
                     msg["tool_calls"] = []
