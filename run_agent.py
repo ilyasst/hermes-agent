@@ -11455,6 +11455,17 @@ class AIAgent:
                             "api_calls": api_call_count,
                             "completed": False,
                             "failed": True,
+                            # [LOCAL PATCH B — 2026-04-29] failure_kind signals
+                            # the gateway to mark this session resume_pending,
+                            # so the next user message gets the auto-continue
+                            # system note (existing logic in gateway/run.py
+                            # ~10099). Without this, only gateway-level
+                            # interruptions (restart/shutdown) trigger the
+                            # resume note — per-call API timeouts left the
+                            # session mid-tool with no resume signal.
+                            # See companion edit in gateway/run.py near
+                            # `agent_failed_early` and reason-phrase mapping.
+                            "failure_kind": "api_failure",
                             "error": _final_summary,
                         }
 

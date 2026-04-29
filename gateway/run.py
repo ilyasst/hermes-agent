@@ -4711,6 +4711,39 @@ class GatewayRunner:
                     session_entry.session_id,
                 )
 
+            # [LOCAL PATCH B — 2026-04-29] Mark session resume_pending on agent
+            # API-failure so the NEXT user message gets the auto-continue
+            # system note (the existing reason-aware branch ~line 10099 in
+            # this file). Without this, upstream auto-continue only fires for
+            # gateway-level interruptions (restart_timeout / shutdown_timeout
+            # / drain_timeout). Per-call API timeouts that exhaust
+            # max_retries left the session mid-tool with no resume signal —
+            # the user's next "Continue" looked context-less to the model.
+            # Companion: run_agent.py adds failure_kind="api_failure" to the
+            # failure return dict; line ~10099 handles the new reason in the
+            # phrase mapping. Watch on git pull: this block + companions.
+            if (
+                agent_failed_early
+                and not agent_result.get("compression_exhausted")
+                and session_entry
+                and session_key
+                and agent_result.get("failure_kind") == "api_failure"
+            ):
+                try:
+                    self.session_store.mark_resume_pending(
+                        session_key, reason="api_failure"
+                    )
+                    logger.info(
+                        "[LOCAL PATCH B] Marked session %s resume_pending=True "
+                        "(reason=api_failure) after agent failure.",
+                        session_entry.session_id,
+                    )
+                except Exception as _exc:
+                    logger.warning(
+                        "[LOCAL PATCH B] mark_resume_pending failed: %s", _exc,
+                    )
+            # [/LOCAL PATCH B]
+
             # When compression is exhausted, the session is permanently too
             # large to process.  Auto-reset it so the next message starts
             # fresh instead of replaying the same oversized context in an
@@ -10097,11 +10130,18 @@ class GatewayRunner:
 
             if _is_resume_pending:
                 _reason = getattr(_resume_entry, "resume_reason", None) or "restart_timeout"
+                # [LOCAL PATCH B — 2026-04-29] Added "api_failure" branch so the
+                # auto-continue note has accurate wording when our companion
+                # patch in this file (~line 4715) marked the session
+                # resume_pending after a max_retries-exhausted API failure.
+                # If you remove that companion, this branch is harmless.
                 _reason_phrase = (
                     "a gateway restart"
                     if _reason == "restart_timeout"
                     else "a gateway shutdown"
                     if _reason == "shutdown_timeout"
+                    else "an API call failure (timeout or backend error)"
+                    if _reason == "api_failure"
                     else "a gateway interruption"
                 )
                 message = (
