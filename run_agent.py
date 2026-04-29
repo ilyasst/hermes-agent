@@ -9519,13 +9519,39 @@ class AIAgent:
         # prefetch_all() on each tool call (10 tool calls = 10x latency + cost).
         # Use original_user_message (clean input) — user_message may contain
         # injected skill content that bloats / breaks provider queries.
+        # [LOCAL PATCH A — 2026-04-29] Anchor prefetch query on conversation tail.
+        # Reason: when a turn fails (API timeout / crash) and the user sends a terse
+        # reply like "Continue", the original code used JUST that reply as the
+        # ByteRover query — pulling unrelated memories and worsening the
+        # post-crash context-loss UX. We instead build the query from the last
+        # ~2 message contents (+ user_message) so the search has real anchor
+        # text. If you see this comment after a `git pull`, verify the merge
+        # didn't drop it. Discussed in hermes_compression_failure_modes.md
+        # memory + the post-crash Continue investigation thread.
         _ext_prefetch_cache = ""
         if self._memory_manager:
             try:
-                _query = original_user_message if isinstance(original_user_message, str) else ""
+                _user = original_user_message if isinstance(original_user_message, str) else ""
+                # Pull up to 2 trailing message contents from the loaded history
+                # to give the prefetch query something specific to anchor on.
+                _tail_parts: list[str] = []
+                _msgs_for_tail = messages if isinstance(messages, list) else []
+                for _m in reversed(_msgs_for_tail[-6:]):  # scan up to 6 recent
+                    _c = _m.get("content") if isinstance(_m, dict) else None
+                    if isinstance(_c, str) and _c.strip():
+                        _tail_parts.append(_c.strip()[:500])
+                        if len(_tail_parts) >= 2:
+                            break
+                _query_parts = list(reversed(_tail_parts))
+                if _user:
+                    _query_parts.append(_user)
+                _query = " | ".join(_query_parts)[:5000]
+                if not _query.strip():
+                    _query = _user  # fallback to legacy behaviour
                 _ext_prefetch_cache = self._memory_manager.prefetch_all(_query) or ""
             except Exception:
                 pass
+        # [/LOCAL PATCH A]
 
         while (api_call_count < self.max_iterations and self.iteration_budget.remaining > 0) or self._budget_grace_call:
             # Reset per-turn checkpoint dedup so each iteration can take one snapshot
