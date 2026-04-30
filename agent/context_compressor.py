@@ -414,6 +414,28 @@ class ContextCompressor(ContextEngine):
         tokens = prompt_tokens if prompt_tokens is not None else self.last_prompt_tokens
         if tokens < self.threshold_tokens:
             return False
+        # [LOCAL PATCH D — 2026-04-30] Force-rearm anti-thrash when prompt
+        # is well past threshold. Without this, two "ineffective" passes
+        # silently disable compression for the rest of the session, the
+        # conversation snowballs past per-slot backend ceilings (typically
+        # 65-73K tokens for our llama.cpp fleet), and every subsequent call
+        # 400-storms across all backends.  Documented in
+        # hermes_compression_failure_modes.md.  Tradeoff: we may invoke
+        # compression on data that previously couldn't compress well, but
+        # retrying is strictly better than the silent-skip cliff.
+        if (
+            self._ineffective_compression_count >= 2
+            and tokens >= int(self.threshold_tokens * 1.2)
+        ):
+            logger.warning(
+                "[LOCAL PATCH D] Compression force-rearmed: tokens=%d >= "
+                "1.2x threshold=%d (was skipping after %d ineffective passes). "
+                "Multiplier chosen so rearm fires at ~66K when threshold=55K, "
+                "comfortably below the ~75K backend ceiling at max_tokens=8192.",
+                tokens, self.threshold_tokens, self._ineffective_compression_count,
+            )
+            self._ineffective_compression_count = 0
+        # [/LOCAL PATCH D]
         # Anti-thrashing: back off if recent compressions were ineffective
         if self._ineffective_compression_count >= 2:
             if not self.quiet_mode:
