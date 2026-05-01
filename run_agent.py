@@ -9810,7 +9810,75 @@ class AIAgent:
             # Calculate approximate request size for logging
             total_chars = sum(len(str(msg)) for msg in api_messages)
             approx_tokens = estimate_messages_tokens_rough(api_messages)
-            
+
+            # [LOCAL PATCH F — 2026-05-01] Update last_prompt_tokens defensively
+            # at SEND time, not only on response. If the API call fails (timeout,
+            # 400, connection error), update_from_response is never called and
+            # last_prompt_tokens stays at the previous successful value — which
+            # may be wildly under-counted if a tool result blew up the prompt
+            # mid-turn. This defensive update keeps the ContextCompressor's
+            # internal tracking honest for any downstream check.
+            if hasattr(self, "context_compressor") and self.context_compressor:
+                self.context_compressor.last_prompt_tokens = approx_tokens
+
+            # [LOCAL PATCH F — 2026-05-01] In-loop preflight compression check.
+            # The original preflight (~L9383) only runs ONCE before the
+            # tool-calling loop starts. If a tool result mid-turn expands the
+            # prompt past threshold, the next API call goes out with the
+            # bloated prompt and gets 400'd by every backend ("all backends
+            # rejected... HTTP 400"). Symptoms: silent multi-minute "still
+            # working", agent stuck on iteration 2/60. This per-iteration
+            # check catches single-turn growth that the outer preflight missed.
+            # Documented in hermes_compression_failure_modes.md.
+            #
+            # Uses estimate_request_tokens_rough (not approx_tokens) because
+            # approx_tokens omits the tools schema (~7-30K tokens extra) — a
+            # gap that hides borderline-over-threshold prompts. The estimator
+            # is still rough (chars/4 vs real tokenizer); we observed real
+            # tokens ~1.5× the rough estimate on JSON-heavy sessions, so
+            # consider tightening compression.threshold to 0.4 in config.yaml
+            # if 400-storms still happen at threshold=0.5.
+            if (
+                self.compression_enabled
+                and api_call_count > 1  # skip on first call — outer preflight already ran
+                and len(messages) > self.context_compressor.protect_first_n
+                                   + self.context_compressor.protect_last_n + 1
+            ):
+                _inloop_tokens = estimate_request_tokens_rough(
+                    messages,
+                    system_prompt=active_system_prompt or "",
+                    tools=self.tools or None,
+                )
+                if _inloop_tokens >= self.context_compressor.threshold_tokens:
+                    logger.info(
+                        "[LOCAL PATCH F] In-loop compression: ~%d tokens >= %d "
+                        "threshold (iter %d/%d, model %s)",
+                        _inloop_tokens, self.context_compressor.threshold_tokens,
+                        api_call_count, self.max_iterations, self.model,
+                    )
+                    self._emit_status(
+                        f"📦 In-loop compression: ~{_inloop_tokens:,} tokens past "
+                        f"threshold (tool result blew budget mid-turn)"
+                    )
+                    _orig_len = len(messages)
+                    messages, active_system_prompt = self._compress_context(
+                        messages, system_message, approx_tokens=_inloop_tokens,
+                        task_id=effective_task_id,
+                    )
+                    if len(messages) < _orig_len:
+                        # Compression worked — clear history ref so flush writes
+                        # compressed messages, reset retry counters since the
+                        # message structure changed, and re-enter the loop so
+                        # api_messages rebuilds from the compressed list.
+                        conversation_history = None
+                        self._empty_content_retries = 0
+                        self._thinking_prefill_retries = 0
+                        self._last_content_with_tools = None
+                        self._last_content_tools_all_housekeeping = False
+                        self._mute_post_response = False
+                        api_call_count -= 1  # don't burn a budget slot on the rebuild
+                        continue
+
             # Thinking spinner for quiet mode (animated during API call)
             thinking_spinner = None
             
@@ -10344,13 +10412,31 @@ class AIAgent:
                                         f"{self.log_prefix}↻ Requesting continuation "
                                         f"({length_continue_retries}/3)..."
                                     )
-                                    continue_msg = {
-                                        "role": "user",
-                                        "content": (
+                                    # [LOCAL PATCH E] Escalating continuation prompts.
+                                    # First attempt: vanilla continue. Second attempt:
+                                    # aggressive — tell the model to wrap up briefly
+                                    # and not echo any prior text or file contents,
+                                    # since "continue" alone tends to produce another
+                                    # truncated reply when the model wants to restate.
+                                    if length_continue_retries == 1:
+                                        _continue_text = (
                                             "[System: Your previous response was truncated by the output "
                                             "length limit. Continue exactly where you left off. Do not "
                                             "restart or repeat prior text. Finish the answer directly.]"
-                                        ),
+                                        )
+                                    else:
+                                        _continue_text = (
+                                            "[System: Your response was truncated AGAIN. The remaining "
+                                            "answer is too long for one message. STOP trying to write a "
+                                            "complete answer. Instead: give a 1-2 short paragraph final "
+                                            "summary and stop. Do NOT repeat or echo any prior text. Do "
+                                            "NOT paste file contents or tool output — the user already "
+                                            "has it. If a result is too large to summarize, just say so "
+                                            "in one sentence and stop.]"
+                                        )
+                                    continue_msg = {
+                                        "role": "user",
+                                        "content": _continue_text,
                                     }
                                     messages.append(continue_msg)
                                     self._session_messages = messages
