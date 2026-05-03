@@ -2995,8 +2995,51 @@ class AIAgent:
             marker in assistant_text for marker in workspace_markers
         )
         return (user_targets_workspace or assistant_targets_workspace) and assistant_mentions_action
-    
-    
+
+    # [LOCAL PATCH G — 2026-05-03] Narrate-without-action detector
+    _NARRATE_TAIL_PATTERNS = (
+        re.compile(r":[\s)\]\*_]*$"),                                # ends with ":"
+        re.compile(r"\blet me\b", re.IGNORECASE),                    # "Let me X"
+        re.compile(r"\bnow i(?:'ll| will)\b", re.IGNORECASE),         # "Now I'll X"
+        re.compile(r"\bnext i(?:'ll| will)\b", re.IGNORECASE),
+        re.compile(r"\bfirst i(?:'ll| will| need|'m going)\b", re.IGNORECASE),
+        re.compile(r"\bi(?:'ll| will) (check|search|find|run|create|read|"
+                   r"write|update|fix|try|look|grab|pull|push|use)\b",
+                   re.IGNORECASE),
+        re.compile(r"\bi'?m going to\b", re.IGNORECASE),
+        re.compile(r"\bgive me a (?:sec|moment|second)\b", re.IGNORECASE),
+        re.compile(r"\bone (?:sec|moment|second)\b", re.IGNORECASE),
+    )
+
+    def _looks_like_narrate_without_action(self, content: str) -> bool:
+        """Detect "narrate-without-action": model emitted intent text but no tool_call.
+
+        qwen3.x and similar thinking models often produce trailing-colon
+        narration like "Let me check the config:" without emitting the
+        corresponding tool_call. Without this detector, the turn ends and
+        the user has to manually nudge ("Ok do it.") for the agent to
+        continue. We retry with a stronger prompt instead. Documented in
+        the hermes_compression_failure_modes memory.
+
+        Triggers when:
+          - Content (after stripping <think> blocks) is non-empty
+          - Content is reasonably short (< 800 chars — long completed
+            answers usually aren't narrate-without-action)
+          - Tail (last 150 chars) ends with `:` OR matches an action-intent
+            phrase from _NARRATE_TAIL_PATTERNS
+        """
+        if not content:
+            return False
+        text = self._strip_think_blocks(content).strip()
+        if not text:
+            return False
+        if len(text) > 800:
+            return False
+        tail = text[-150:]
+        return any(p.search(tail) for p in self._NARRATE_TAIL_PATTERNS)
+    # [/LOCAL PATCH G]
+
+
     def _extract_reasoning(self, assistant_message) -> Optional[str]:
         """
         Extract reasoning/thinking content from an assistant message.
@@ -9482,6 +9525,8 @@ class AIAgent:
         final_response = None
         interrupted = False
         codex_ack_continuations = 0
+        # [LOCAL PATCH G] retries for narrate-without-action nudge
+        narrate_no_action_retries = 0
         length_continue_retries = 0
         truncated_tool_call_retries = 0
         truncated_response_prefix = ""
@@ -12386,11 +12431,63 @@ class AIAgent:
 
                     codex_ack_continuations = 0
 
+                    # [LOCAL PATCH G — 2026-05-03] Narrate-without-action detector.
+                    # qwen3.x and similar thinking models routinely emit
+                    # "Let me X:" or "I'll Y" then stop, forgetting to
+                    # actually emit the tool_call. Without intervention the
+                    # turn ends and the user has to manually say "ok do it"
+                    # (or worse, the agent appears to be working with no
+                    # progress). When we still have tools and budget, force
+                    # one retry with a strong nudge before accepting this
+                    # as the final response. Mirror of the codex-ack path
+                    # above. Limit: 2 retries per turn — beyond that, the
+                    # user's intent is probably "the agent really meant
+                    # this as the answer", so accept it.
+                    if (
+                        self.valid_tool_names
+                        and not getattr(assistant_message, "tool_calls", None)
+                        and finish_reason == "stop"
+                        and narrate_no_action_retries < 2
+                        and self._looks_like_narrate_without_action(final_response)
+                    ):
+                        narrate_no_action_retries += 1
+                        logger.info(
+                            "[LOCAL PATCH G] narrate-without-action detected "
+                            "(%d/2), nudging. tail=%r",
+                            narrate_no_action_retries,
+                            (final_response or "")[-120:],
+                        )
+                        self._emit_status(
+                            f"↻ Narration without tool_call — nudging "
+                            f"({narrate_no_action_retries}/2)"
+                        )
+                        interim_msg = self._build_assistant_message(
+                            assistant_message, "incomplete",
+                        )
+                        messages.append(interim_msg)
+                        self._emit_interim_assistant_message(interim_msg)
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "[System: Your previous response said you would "
+                                "take an action (e.g. \"Let me X\", \"I'll Y\") "
+                                "but did not include any tool_call. Either emit "
+                                "the tool_call right now to actually do what you "
+                                "said, or finish your response with a concrete "
+                                "answer or question — don't leave a sentence "
+                                "trailing with no follow-through.]"
+                            ),
+                        })
+                        self._session_messages = messages
+                        self._save_session_log(messages)
+                        continue
+                    # [/LOCAL PATCH G]
+
                     if truncated_response_prefix:
                         final_response = truncated_response_prefix + final_response
                         truncated_response_prefix = ""
                         length_continue_retries = 0
-                    
+
                     # Strip <think> blocks from user-facing response (keep raw in messages for trajectory)
                     final_response = self._strip_think_blocks(final_response).strip()
                     
