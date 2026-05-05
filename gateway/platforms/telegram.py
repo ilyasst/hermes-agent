@@ -705,8 +705,10 @@ class TelegramAdapter(BasePlatformAdapter):
 
         loop = asyncio.get_running_loop()
 
-        def _post_audio() -> Optional[str]:
-            """Submit the audio file to distill, return job_id or None."""
+        def _post_audio() -> tuple[Optional[str], Optional[str]]:
+            """Submit audio to distill. Returns (job_id, error_message).
+            On success: (job_id, None). On failure: (None, "<short reason>").
+            The error string is short enough to put in a Telegram message."""
             try:
                 file_bytes = _Path(cached_audio_path).read_bytes()
                 filename = _Path(cached_audio_path).name
@@ -730,10 +732,23 @@ class TelegramAdapter(BasePlatformAdapter):
                 )
                 with urllib.request.urlopen(req, timeout=60) as resp:
                     data = _json.loads(resp.read())
-                    return data.get("id")
+                    return data.get("id"), None
+            except urllib.error.HTTPError as exc:
+                # Server returned an HTTP error — read its body for the user.
+                try:
+                    body_text = exc.read().decode(errors="replace").strip()[:500]
+                except Exception:
+                    body_text = ""
+                msg = f"HTTP {exc.code} {exc.reason}"
+                if body_text:
+                    msg += f" — {body_text}"
+                logger.warning("[distill] POST failed: %s", msg)
+                return None, msg
             except Exception as exc:
-                logger.warning("[distill] POST failed: %s", exc, exc_info=True)
-                return None
+                # Network errors, JSON decode errors, file-read errors.
+                msg = f"{type(exc).__name__}: {exc}"[:500]
+                logger.warning("[distill] POST failed: %s", msg, exc_info=True)
+                return None, msg
 
         def _poll_status(job_id: str) -> Optional[dict]:
             """Poll /status/<id> until terminal, return final meta or None."""
@@ -775,16 +790,28 @@ class TelegramAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.warning("[distill] ack send failed: %s", exc)
 
-        job_id = await loop.run_in_executor(None, _post_audio)
+        job_id, post_err = await loop.run_in_executor(None, _post_audio)
         if not job_id:
+            err_text = post_err or "unknown error"
+            # Telegram caps messages at 4096 chars; keep room for the framing.
+            err_text = err_text[:3500]
             try:
                 await self._bot.send_message(
                     chat_id=chat_id,
-                    text="❌ distill upload failed — see gateway logs.",
+                    text=f"❌ distill upload failed:\n```\n{err_text}\n```",
                     message_thread_id=thread_id,
+                    parse_mode="Markdown",
                 )
             except Exception:
-                pass
+                # Markdown parse can fail on stray backticks etc; fall back to plain.
+                try:
+                    await self._bot.send_message(
+                        chat_id=chat_id,
+                        text=f"❌ distill upload failed: {err_text}",
+                        message_thread_id=thread_id,
+                    )
+                except Exception:
+                    pass
             return
 
         logger.info("[distill] Submitted job %s, polling…", job_id)
