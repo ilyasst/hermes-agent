@@ -69,7 +69,6 @@ mini-swe-agent/
 .nix-stamps/
 result
 website/static/api/skills-index.json
-
 # [LOCAL fork] Keep fleet/personal state out of the repo. The .env/.gitignore
 # rules above only catch exact-named files; these patterns also catch
 # timestamped backups (e.g. .env.bak-pre-X-20260430) and byterover runtime
@@ -77,3 +76,4 @@ website/static/api/skills-index.json
 *.bak
 *.bak-*
 .brv/
+models-dev-upstream/

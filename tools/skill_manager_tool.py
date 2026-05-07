@@ -42,6 +42,9 @@ from pathlib import Path
 from hermes_constants import get_hermes_home, display_hermes_home
 from typing import Dict, Any, Optional, Tuple
 
+from utils import atomic_replace, is_truthy_value
+from hermes_cli.config import cfg_get
+
 logger = logging.getLogger(__name__)
 
 # Import security scanner — external hub installs always get scanned;
@@ -64,7 +67,10 @@ def _guard_agent_created_enabled() -> bool:
     try:
         from hermes_cli.config import load_config
         cfg = load_config()
-        return bool(cfg.get("skills", {}).get("guard_agent_created", False))
+        return is_truthy_value(
+            cfg_get(cfg, "skills", "guard_agent_created"),
+            default=False,
+        )
     except Exception:
         return False
 
@@ -106,16 +112,55 @@ MAX_NAME_LENGTH = 64
 MAX_DESCRIPTION_LENGTH = 1024
 
 
-def _is_local_skill(skill_path: Path) -> bool:
-    """Check if a skill path is within the local SKILLS_DIR.
+def _containing_skills_root(skill_path: Path) -> Path:
+    """Return the skills root directory (local or external_dirs entry) that
+    contains ``skill_path``.  Falls back to the local ``SKILLS_DIR`` if no
+    match is found (defensive — callers should have located the skill via
+    ``_find_skill`` first).
+    """
+    from agent.skill_utils import get_all_skills_dirs
 
-    Skills found in external_dirs are read-only from the agent's perspective.
+    try:
+        resolved = skill_path.resolve()
+    except OSError:
+        resolved = skill_path
+
+    for root in get_all_skills_dirs():
+        try:
+            resolved.relative_to(root.resolve())
+            return root
+        except (ValueError, OSError):
+            continue
+    return SKILLS_DIR
+
+
+def _pinned_guard(name: str) -> Optional[str]:
+    """Return a refusal message if *name* is pinned, else None.
+
+    Pin protects a skill from **deletion** — both the curator's auto-archive
+    passes and the agent's ``skill_manage(action="delete")`` tool call. The
+    agent can still patch/edit pinned skills; pin only guards against
+    irrecoverable loss, not against content evolution.
+
+    Best-effort: if the sidecar is unreadable we let the delete through
+    rather than block on a broken telemetry file.
     """
     try:
-        skill_path.resolve().relative_to(SKILLS_DIR.resolve())
-        return True
-    except ValueError:
-        return False
+        from tools import skill_usage
+        rec = skill_usage.get_record(name)
+        if rec.get("pinned"):
+            return (
+                f"Skill '{name}' is pinned and cannot be deleted by "
+                f"skill_manage. Ask the user to run "
+                f"`hermes curator unpin {name}` if they want to delete it. "
+                f"Patches and edits are allowed on pinned skills; only "
+                f"deletion is blocked."
+            )
+    except Exception:
+        logger.debug("pinned-guard lookup failed for %s", name, exc_info=True)
+    return None
+
+
 MAX_SKILL_CONTENT_CHARS = 100_000   # ~36k tokens at 2.75 chars/token
 MAX_SKILL_FILE_BYTES = 1_048_576    # 1 MiB per supporting file
 
@@ -309,7 +354,7 @@ def _atomic_write_text(file_path: Path, content: str, encoding: str = "utf-8") -
     try:
         with os.fdopen(fd, "w", encoding=encoding) as f:
             f.write(content)
-        os.replace(temp_path, file_path)
+        atomic_replace(temp_path, file_path)
     except Exception:
         # Clean up temp file on error
         try:
@@ -394,9 +439,6 @@ def _edit_skill(name: str, content: str) -> Dict[str, Any]:
     if not existing:
         return {"success": False, "error": f"Skill '{name}' not found. Use skills_list() to see available skills."}
 
-    if not _is_local_skill(existing["path"]):
-        return {"success": False, "error": f"Skill '{name}' is in an external directory and cannot be modified. Copy it to your local skills directory first."}
-
     skill_md = existing["path"] / "SKILL.md"
     # Back up original content for rollback
     original_content = skill_md.read_text(encoding="utf-8") if skill_md.exists() else None
@@ -436,9 +478,6 @@ def _patch_skill(
     existing = _find_skill(name)
     if not existing:
         return {"success": False, "error": f"Skill '{name}' not found."}
-
-    if not _is_local_skill(existing["path"]):
-        return {"success": False, "error": f"Skill '{name}' is in an external directory and cannot be modified. Copy it to your local skills directory first."}
 
     skill_dir = existing["path"]
 
@@ -513,26 +552,60 @@ def _patch_skill(
     }
 
 
-def _delete_skill(name: str) -> Dict[str, Any]:
-    """Delete a skill."""
+def _delete_skill(name: str, absorbed_into: Optional[str] = None) -> Dict[str, Any]:
+    """Delete a skill.
+
+    ``absorbed_into`` declares intent:
+      - ``None`` / missing  → caller didn't declare (legacy / non-curator path);
+        accepted for backward compat but logs a warning because the curator
+        classification pipeline can't tell consolidation from pruning without it.
+      - ``""`` (empty)      → explicit "truly pruned, no forwarding target".
+      - ``"<skill-name>"``  → content was absorbed into that umbrella; the
+        target must exist on disk. Validated here so the model can't claim an
+        umbrella that doesn't exist.
+    """
     existing = _find_skill(name)
     if not existing:
         return {"success": False, "error": f"Skill '{name}' not found."}
 
-    if not _is_local_skill(existing["path"]):
-        return {"success": False, "error": f"Skill '{name}' is in an external directory and cannot be deleted."}
+    pinned_err = _pinned_guard(name)
+    if pinned_err:
+        return {"success": False, "error": pinned_err}
+
+    # Validate absorbed_into target when declared non-empty
+    if absorbed_into is not None and isinstance(absorbed_into, str) and absorbed_into.strip():
+        target_name = absorbed_into.strip()
+        if target_name == name:
+            return {
+                "success": False,
+                "error": f"absorbed_into='{target_name}' cannot equal the skill being deleted.",
+            }
+        target = _find_skill(target_name)
+        if not target:
+            return {
+                "success": False,
+                "error": (
+                    f"absorbed_into='{target_name}' does not exist. "
+                    f"Create or patch the umbrella skill first, then retry the delete."
+                ),
+            }
 
     skill_dir = existing["path"]
+    skills_root = _containing_skills_root(skill_dir)
     shutil.rmtree(skill_dir)
 
-    # Clean up empty category directories (don't remove SKILLS_DIR itself)
+    # Clean up empty category directories (don't remove the skills root itself)
     parent = skill_dir.parent
-    if parent != SKILLS_DIR and parent.exists() and not any(parent.iterdir()):
+    if parent != skills_root and parent.exists() and not any(parent.iterdir()):
         parent.rmdir()
+
+    message = f"Skill '{name}' deleted."
+    if absorbed_into is not None and isinstance(absorbed_into, str) and absorbed_into.strip():
+        message += f" Content absorbed into '{absorbed_into.strip()}'."
 
     return {
         "success": True,
-        "message": f"Skill '{name}' deleted.",
+        "message": message,
     }
 
 
@@ -563,9 +636,6 @@ def _write_file(name: str, file_path: str, file_content: str) -> Dict[str, Any]:
     existing = _find_skill(name)
     if not existing:
         return {"success": False, "error": f"Skill '{name}' not found. Create it first with action='create'."}
-
-    if not _is_local_skill(existing["path"]):
-        return {"success": False, "error": f"Skill '{name}' is in an external directory and cannot be modified. Copy it to your local skills directory first."}
 
     target, err = _resolve_skill_target(existing["path"], file_path)
     if err:
@@ -600,9 +670,6 @@ def _remove_file(name: str, file_path: str) -> Dict[str, Any]:
     existing = _find_skill(name)
     if not existing:
         return {"success": False, "error": f"Skill '{name}' not found."}
-
-    if not _is_local_skill(existing["path"]):
-        return {"success": False, "error": f"Skill '{name}' is in an external directory and cannot be modified."}
 
     skill_dir = existing["path"]
 
@@ -651,6 +718,7 @@ def skill_manage(
     old_string: str = None,
     new_string: str = None,
     replace_all: bool = False,
+    absorbed_into: str = None,
 ) -> str:
     """
     Manage user-created skills. Dispatches to the appropriate action handler.
@@ -675,7 +743,7 @@ def skill_manage(
         result = _patch_skill(name, old_string, new_string, file_path, replace_all)
 
     elif action == "delete":
-        result = _delete_skill(name)
+        result = _delete_skill(name, absorbed_into=absorbed_into)
 
     elif action == "write_file":
         if not file_path:
@@ -698,6 +766,24 @@ def skill_manage(
             clear_skills_system_prompt_cache(clear_snapshot=True)
         except Exception:
             pass
+        # Curator telemetry: bump patch_count on edit/patch/write_file (the actions
+        # that mutate an existing skill's guidance), drop the record on delete.
+        # Only mark a skill as agent-created when the background self-improvement
+        # review fork creates it — foreground `skill_manage(create)` calls are
+        # user-directed, and those skills belong to the user (the curator must
+        # not touch them). Best-effort; telemetry failures never break the tool.
+        try:
+            from tools.skill_usage import bump_patch, forget, mark_agent_created
+            from tools.skill_provenance import is_background_review
+            if action == "create":
+                if is_background_review():
+                    mark_agent_created(name)
+            elif action in ("patch", "edit", "write_file", "remove_file"):
+                bump_patch(name)
+            elif action == "delete":
+                forget(name)
+        except Exception:
+            pass
 
     return json.dumps(result, ensure_ascii=False)
 
@@ -709,26 +795,112 @@ def skill_manage(
 SKILL_MANAGE_SCHEMA = {
     "name": "skill_manage",
     "description": (
-        "Manage skills (procedural memory for recurring tasks). New skills go to "
-        f"{display_hermes_home()}/skills/. Actions: create (full SKILL.md), patch (targeted "
-        "old_string→new_string, preferred), edit (full rewrite), delete, "
-        "write_file, remove_file. Create after complex successful workflows "
-        "(5+ calls, overcame errors, user-validated approach); patch when a "
-        "skill is stale or missing pitfalls. Confirm with user before create/delete. "
-        "Use skill_view() to inspect existing skills."
+        "Manage skills (create, update, delete). Skills are your procedural "
+        "memory — reusable approaches for recurring task types. "
+        f"New skills go to {display_hermes_home()}/skills/; existing skills can be modified wherever they live.\n\n"
+        "Actions: create (full SKILL.md + optional category), "
+        "patch (old_string/new_string — preferred for fixes), "
+        "edit (full SKILL.md rewrite — major overhauls only), "
+        "delete, write_file, remove_file.\n\n"
+        "On delete, pass `absorbed_into=<umbrella>` when you're merging this "
+        "skill's content into another one, or `absorbed_into=\"\"` when you're "
+        "pruning it with no forwarding target. This lets the curator tell "
+        "consolidation from pruning without guessing, so downstream consumers "
+        "(cron jobs that reference the old skill name, etc.) get updated "
+        "correctly. The target you name in `absorbed_into` must already "
+        "exist — create/patch the umbrella first, then delete.\n\n"
+        "Create when: complex task succeeded (5+ calls), errors overcome, "
+        "user-corrected approach worked, non-trivial workflow discovered, "
+        "or user asks you to remember a procedure.\n"
+        "Update when: instructions stale/wrong, OS-specific failures, "
+        "missing steps or pitfalls found during use. "
+        "If you used a skill and hit issues not covered by it, patch it immediately.\n\n"
+        "After difficult/iterative tasks, offer to save as a skill. "
+        "Skip for simple one-offs. Confirm with user before creating/deleting.\n\n"
+        "Good skills: trigger conditions, numbered steps with exact commands, "
+        "pitfalls section, verification steps. Use skill_view() to see format examples.\n\n"
+        "Pinned skills are protected from deletion only — skill_manage(action='delete') "
+        "will refuse with a message pointing the user to `hermes curator unpin <name>`. "
+        "Patches and edits go through on pinned skills so you can still improve them as "
+        "pitfalls come up; pin only guards against irrecoverable loss."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "action": {"type": "string", "enum": ["create", "patch", "edit", "delete", "write_file", "remove_file"]},
-            "name": {"type": "string", "description": "Skill name (lowercase, hyphens/underscores, ≤64 chars)."},
-            "content": {"type": "string", "description": "Full SKILL.md (YAML frontmatter + body). For create/edit."},
-            "old_string": {"type": "string", "description": "Unique match text for patch (or set replace_all)."},
-            "new_string": {"type": "string", "description": "Replacement text for patch (empty deletes)."},
-            "replace_all": {"type": "boolean", "description": "Patch: replace all occurrences (default false)."},
-            "category": {"type": "string", "description": "Optional subdir for create (e.g. 'devops')."},
-            "file_path": {"type": "string", "description": "Supporting file under references/templates/scripts/assets/. Patch defaults to SKILL.md."},
-            "file_content": {"type": "string", "description": "Content for write_file."},
+            "action": {
+                "type": "string",
+                "enum": ["create", "patch", "edit", "delete", "write_file", "remove_file"],
+                "description": "The action to perform."
+            },
+            "name": {
+                "type": "string",
+                "description": (
+                    "Skill name (lowercase, hyphens/underscores, max 64 chars). "
+                    "Must match an existing skill for patch/edit/delete/write_file/remove_file."
+                )
+            },
+            "content": {
+                "type": "string",
+                "description": (
+                    "Full SKILL.md content (YAML frontmatter + markdown body). "
+                    "Required for 'create' and 'edit'. For 'edit', read the skill "
+                    "first with skill_view() and provide the complete updated text."
+                )
+            },
+            "old_string": {
+                "type": "string",
+                "description": (
+                    "Text to find in the file (required for 'patch'). Must be unique "
+                    "unless replace_all=true. Include enough surrounding context to "
+                    "ensure uniqueness."
+                )
+            },
+            "new_string": {
+                "type": "string",
+                "description": (
+                    "Replacement text (required for 'patch'). Can be empty string "
+                    "to delete the matched text."
+                )
+            },
+            "replace_all": {
+                "type": "boolean",
+                "description": "For 'patch': replace all occurrences instead of requiring a unique match (default: false)."
+            },
+            "category": {
+                "type": "string",
+                "description": (
+                    "Optional category/domain for organizing the skill (e.g., 'devops', "
+                    "'data-science', 'mlops'). Creates a subdirectory grouping. "
+                    "Only used with 'create'."
+                )
+            },
+            "file_path": {
+                "type": "string",
+                "description": (
+                    "Path to a supporting file within the skill directory. "
+                    "For 'write_file'/'remove_file': required, must be under references/, "
+                    "templates/, scripts/, or assets/. "
+                    "For 'patch': optional, defaults to SKILL.md if omitted."
+                )
+            },
+            "file_content": {
+                "type": "string",
+                "description": "Content for the file. Required for 'write_file'."
+            },
+            "absorbed_into": {
+                "type": "string",
+                "description": (
+                    "For 'delete' only — declares intent so the curator can "
+                    "tell consolidation from pruning without guessing. "
+                    "Pass the umbrella skill name when this skill's content "
+                    "was merged into another (the target must already exist). "
+                    "Pass an empty string when the skill is truly stale and "
+                    "being pruned with no forwarding target. Omitting the arg "
+                    "on delete is supported for backward compatibility but "
+                    "downstream tooling (e.g. cron-job skill reference "
+                    "rewriting) will have to guess at intent."
+                )
+            },
         },
         "required": ["action", "name"],
     },
@@ -751,6 +923,7 @@ registry.register(
         file_content=args.get("file_content"),
         old_string=args.get("old_string"),
         new_string=args.get("new_string"),
-        replace_all=args.get("replace_all", False)),
+        replace_all=args.get("replace_all", False),
+        absorbed_into=args.get("absorbed_into")),
     emoji="📝",
 )
