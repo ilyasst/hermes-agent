@@ -1716,6 +1716,16 @@ class AIAgent:
             _agent_cfg = _load_agent_config()
         except Exception:
             _agent_cfg = {}
+        # [LOCAL] Toggles for fork-only patches. All default True for
+        # backward-compat with existing deployments. Override in config.yaml:
+        #   local_patches:
+        #     patch_d_force_rearm: false   # Compression force-rearm at 1.2x threshold
+        #     patch_e_continuation_escalation: false
+        #     patch_f_inloop_compression: false
+        #     patch_g_narrate_detector: false
+        # When LCM (hermes-lcm) is the active context engine, D and F never
+        # execute regardless of these flags (legacy compressor path is dead).
+        self._local_patches = _agent_cfg.get("local_patches") or {}
         try:
             self._tool_guardrails = ToolCallGuardrailController(
                 ToolCallGuardrailConfig.from_mapping(
@@ -2065,6 +2075,7 @@ class AIAgent:
                 config_context_length=_config_context_length,
                 provider=self.provider,
                 api_mode=self.api_mode,
+                local_patches=self._local_patches,
             )
         self.compression_enabled = compression_enabled
 
@@ -11299,7 +11310,11 @@ class AIAgent:
             # may be wildly under-counted if a tool result blew up the prompt
             # mid-turn. This defensive update keeps the ContextCompressor's
             # internal tracking honest for any downstream check.
-            if hasattr(self, "context_compressor") and self.context_compressor:
+            # Gate: local_patches.patch_f_inloop_compression (default true).
+            if (
+                self._local_patches.get("patch_f_inloop_compression", True)
+                and hasattr(self, "context_compressor") and self.context_compressor
+            ):
                 self.context_compressor.last_prompt_tokens = approx_tokens
 
             # [LOCAL PATCH F — 2026-05-01] In-loop preflight compression check.
@@ -11320,7 +11335,8 @@ class AIAgent:
             # consider tightening compression.threshold to 0.4 in config.yaml
             # if 400-storms still happen at threshold=0.5.
             if (
-                self.compression_enabled
+                self._local_patches.get("patch_f_inloop_compression", True)
+                and self.compression_enabled
                 and api_call_count > 1  # skip on first call — outer preflight already ran
                 and len(messages) > self.context_compressor.protect_first_n
                                    + self.context_compressor.protect_last_n + 1
@@ -11912,7 +11928,16 @@ class AIAgent:
                                     # and not echo any prior text or file contents,
                                     # since "continue" alone tends to produce another
                                     # truncated reply when the model wants to restate.
-                                    if length_continue_retries == 1:
+                                    # Gate: local_patches.patch_e_continuation_escalation
+                                    # (default true). When disabled, all retries use
+                                    # the mild continuation prompt.
+                                    if not self._local_patches.get("patch_e_continuation_escalation", True):
+                                        _continue_text = (
+                                            "[System: Your previous response was truncated by the output "
+                                            "length limit. Continue exactly where you left off. Do not "
+                                            "restart or repeat prior text. Finish the answer directly.]"
+                                        )
+                                    elif length_continue_retries == 1:
                                         _continue_text = (
                                             "[System: Your previous response was truncated by the output "
                                             "length limit. Continue exactly where you left off. Do not "
@@ -14061,7 +14086,8 @@ class AIAgent:
                     # user's intent is probably "the agent really meant
                     # this as the answer", so accept it.
                     if (
-                        self.valid_tool_names
+                        self._local_patches.get("patch_g_narrate_detector", True)
+                        and self.valid_tool_names
                         and not getattr(assistant_message, "tool_calls", None)
                         and finish_reason == "stop"
                         and narrate_no_action_retries < 2

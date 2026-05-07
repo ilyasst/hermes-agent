@@ -391,12 +391,16 @@ class ContextCompressor(ContextEngine):
         config_context_length: int | None = None,
         provider: str = "",
         api_mode: str = "",
+        local_patches: dict | None = None,
     ):
         self.model = model
         self.base_url = base_url
         self.api_key = api_key
         self.provider = provider
         self.api_mode = api_mode
+        # [LOCAL] Toggles for fork-only compression patches; default True for
+        # backward-compat. See run_agent.py for the full list of gates.
+        self._local_patches = local_patches or {}
         self.threshold_percent = threshold_percent
         self.protect_first_n = protect_first_n
         self.protect_last_n = protect_last_n
@@ -485,8 +489,10 @@ class ContextCompressor(ContextEngine):
         # hermes_compression_failure_modes.md.  Tradeoff: we may invoke
         # compression on data that previously couldn't compress well, but
         # retrying is strictly better than the silent-skip cliff.
+        # Gate: local_patches.patch_d_force_rearm (default true).
         if (
-            self._ineffective_compression_count >= 2
+            self._local_patches.get("patch_d_force_rearm", True)
+            and self._ineffective_compression_count >= 2
             and tokens >= int(self.threshold_tokens * 1.2)
         ):
             logger.warning(
