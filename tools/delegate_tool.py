@@ -1842,6 +1842,7 @@ def delegate_task(
     acp_command: Optional[str] = None,
     acp_args: Optional[List[str]] = None,
     role: Optional[str] = None,
+    capability: Optional[str] = None,
     parent_agent=None,
 ) -> str:
     """
@@ -1960,18 +1961,32 @@ def delegate_task(
     # Wrapped in try/finally so the global is always restored even if a
     # child build raises (otherwise _last_resolved_tool_names stays corrupted).
     children = []
+    # Normalise top-level capability once. Empty strings are treated as None
+    # so the agent can pass capability="" to mean "no override" without
+    # breaking the precedence chain.
+    top_capability = capability.strip() if isinstance(capability, str) and capability.strip() else None
     try:
         for i, t in enumerate(task_list):
             task_acp_args = t.get("acp_args") if "acp_args" in t else None
             # Per-task role beats top-level; normalise again so unknown
             # per-task values warn and degrade to leaf uniformly.
             effective_role = _normalize_role(t.get("role") or top_role)
+            # [LOCAL] Capability override precedence:
+            #   per-task capability > top-level capability > delegation.model
+            # When set, the model the child sends to the API becomes the
+            # capability label (e.g. "coding"); caproute resolves it to a
+            # concrete backend at request time. Provider/base_url/api_key
+            # come from the delegation config (which should point at
+            # caproute for capability resolution to work).
+            _task_cap = t.get("capability")
+            _task_cap = _task_cap.strip() if isinstance(_task_cap, str) and _task_cap.strip() else None
+            effective_model = _task_cap or top_capability or creds["model"]
             child = _build_child_agent(
                 task_index=i,
                 goal=t["goal"],
                 context=t.get("context"),
                 toolsets=t.get("toolsets") or toolsets,
-                model=creds["model"],
+                model=effective_model,
                 max_iterations=effective_max_iter,
                 task_count=n_tasks,
                 parent_agent=parent_agent,
@@ -2429,7 +2444,12 @@ DELEGATE_TASK_SCHEMA = {
         "(default 2) and can be disabled globally via "
         "delegation.orchestrator_enabled=false.\n"
         "- Each subagent gets its own terminal session (separate working directory and state).\n"
-        "- Results are always returned as an array, one entry per task."
+        "- Results are always returned as an array, one entry per task.\n"
+        "- [LOCAL] You can specify 'capability' (top-level or per-task) to route "
+        "the subagent through a specialised backend: 'coding' for code-shaped "
+        "work, 'fast' for short/cheap lookups, 'vision' for image input, etc. "
+        "When the right capability isn't obvious, omit it — children fall back "
+        "to delegation.model from config."
     ),
     "parameters": {
         "type": "object",
@@ -2470,6 +2490,18 @@ DELEGATE_TASK_SCHEMA = {
                             "enum": ["leaf", "orchestrator"],
                             "description": "Per-task role override. See top-level 'role' for semantics.",
                         },
+                        "capability": {
+                            "type": "string",
+                            "description": (
+                                "[LOCAL] Per-task capability override. Routes this child's API "
+                                "calls through the caproute capability layer to a backend "
+                                "specialised for that task shape. Common values: 'thinking' "
+                                "(default reasoning), 'adequate' (fast 30B-class), 'fast' "
+                                "(small/cheap), 'coding' (code-tuned), 'vision' (image input). "
+                                "When omitted, child uses delegation.model from config. "
+                                "Per-task capability overrides the top-level capability."
+                            ),
+                        },
                     },
                     "required": ["goal"],
                 },
@@ -2506,6 +2538,22 @@ DELEGATE_TASK_SCHEMA = {
                 ),
             },
             "max_iterations": {"type": "integer", "description": "Max turns per subagent (default 50)."},
+            "capability": {
+                "type": "string",
+                "description": (
+                    "[LOCAL] Capability label that routes the child's API calls "
+                    "through the caproute capability layer. Use this to send "
+                    "code-shaped subtasks to a code-tuned model, vision tasks "
+                    "to a vision model, etc., without having to know the exact "
+                    "model name. Common values: 'thinking' (default reasoning, "
+                    "~27-30B), 'adequate' (fast 30B-class non-thinking), "
+                    "'fast' (small/cheap, ~4B), 'coding' (code-tuned), "
+                    "'vision' (image input). When using the 'tasks' batch "
+                    "mode, each task entry can override this with its own "
+                    "'capability' field. When omitted, children use "
+                    "delegation.model from config."
+                ),
+            },
         },
         "required": [],
     },
@@ -2528,6 +2576,7 @@ registry.register(
         acp_command=args.get("acp_command"),
         acp_args=args.get("acp_args"),
         role=args.get("role"),
+        capability=args.get("capability"),
         parent_agent=kw.get("parent_agent"),
     ),
     check_fn=check_delegate_requirements,
