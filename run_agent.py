@@ -3330,8 +3330,13 @@ class AIAgent:
 
         Triggers when:
           - Content (after stripping <think> blocks) is non-empty
-          - Content is reasonably short (< 800 chars — long completed
-            answers usually aren't narrate-without-action)
+          - Content is reasonably short (< 1800 chars — long completed
+            answers usually aren't narrate-without-action). Bumped from
+            800 → 1800 on 2026-05-08 after a real session missed
+            detection at 910 chars: agent said "Je vais traduire... Let
+            me read the full document in chunks. I'll use absolute
+            paths." then ended its turn without doing the work. Threshold
+            covers the typical "explain my plan" preamble length.
           - Tail (last 150 chars) ends with `:` OR matches an action-intent
             phrase from _NARRATE_TAIL_PATTERNS
         """
@@ -3340,7 +3345,7 @@ class AIAgent:
         text = self._strip_think_blocks(content).strip()
         if not text:
             return False
-        if len(text) > 800:
+        if len(text) > 1800:
             return False
         tail = text[-150:]
         return any(p.search(tail) for p in self._NARRATE_TAIL_PATTERNS)
