@@ -10710,6 +10710,14 @@ class AIAgent:
         self._codex_incomplete_retries = 0
         self._thinking_prefill_retries = 0
         self._post_tool_empty_retried = False
+        # [LOCAL PATCH H — 2026-05-08] Throttle Telegram visibility of post-tool
+        # empty-response nudges. Recovery still fires every round (the
+        # mechanism is unchanged), but the Telegram '⚠️ nudging to continue'
+        # status only emits on the FIRST nudge per conversation and again
+        # after a quiet window. Almost all first nudges succeed silently; the
+        # cooldown emit signals a persistent stall (model genuinely stuck).
+        self._post_tool_empty_total = 0
+        self._post_tool_empty_last_emit_ts = 0.0
         self._last_content_with_tools = None
         self._last_content_tools_all_housekeeping = False
         self._mute_post_response = False
@@ -13888,14 +13896,42 @@ class AIAgent:
                             # on a later empty response after the nudge.
                             self._last_content_with_tools = None
                             self._last_content_tools_all_housekeeping = False
+                            # [LOCAL PATCH H] Track running count + cooldown so
+                            # Telegram emit only fires on the first nudge of
+                            # the conversation and on subsequent nudges that
+                            # cross the cooldown window. Recovery itself is
+                            # unchanged — only the visible status throttles.
+                            # Gate: local_patches.patch_h_quiet_post_tool_nudge
+                            # (default true). When disabled, every nudge emits.
+                            _pth_quiet = self._local_patches.get(
+                                "patch_h_quiet_post_tool_nudge", True
+                            )
+                            self._post_tool_empty_total = getattr(
+                                self, "_post_tool_empty_total", 0
+                            ) + 1
+                            _pth_now = time.time()
+                            _pth_cooldown_s = 300.0  # 5 min between Telegram emits
+                            _pth_emit = (
+                                (not _pth_quiet)
+                                or self._post_tool_empty_total == 1
+                                or (_pth_now - getattr(self, "_post_tool_empty_last_emit_ts", 0.0)) > _pth_cooldown_s
+                            )
                             logger.info(
-                                "Empty response after tool calls — nudging model "
-                                "to continue processing"
+                                "Empty response after tool calls (#%d) — "
+                                "nudging model to continue processing "
+                                "(emit_to_user=%s)",
+                                self._post_tool_empty_total, _pth_emit,
                             )
-                            self._emit_status(
-                                "⚠️ Model returned empty after tool calls — "
-                                "nudging to continue"
-                            )
+                            if _pth_emit:
+                                self._post_tool_empty_last_emit_ts = _pth_now
+                                self._emit_status(
+                                    "⚠️ Model returned empty after tool calls — "
+                                    "nudging to continue"
+                                    + (
+                                        f" (#{self._post_tool_empty_total} this session)"
+                                        if self._post_tool_empty_total > 1 else ""
+                                    )
+                                )
                             # Append the empty assistant message first so the
                             # message sequence stays valid:
                             #   tool(result) → assistant("(empty)") → user(nudge)
