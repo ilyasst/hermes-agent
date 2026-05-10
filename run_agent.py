@@ -13659,11 +13659,25 @@ class AIAgent:
                         _HOUSEKEEPING_TOOLS = frozenset({
                             "memory", "todo", "skill_manage", "session_search",
                         })
+                        # [LOCAL PATCH 2026-05-10] todo_* is excluded from the
+                        # fallback set: todo_create at the START of multi-step
+                        # work is intent-to-act, so an empty follow-up should
+                        # nudge the model to continue, not promote the
+                        # narration ("Got it, setting up...") to final answer.
+                        # Muting (below) keeps todo_* in the housekeeping set
+                        # so display UX is unchanged.
+                        _FALLBACK_HOUSEKEEPING_TOOLS = frozenset({
+                            "memory", "skill_manage", "session_search",
+                        })
                         _all_housekeeping = all(
                             tc.function.name in _HOUSEKEEPING_TOOLS
                             for tc in assistant_message.tool_calls
                         )
-                        self._last_content_tools_all_housekeeping = _all_housekeeping
+                        _all_fallback_housekeeping = all(
+                            tc.function.name in _FALLBACK_HOUSEKEEPING_TOOLS
+                            for tc in assistant_message.tool_calls
+                        )
+                        self._last_content_tools_all_housekeeping = _all_fallback_housekeeping
                         if _all_housekeeping and self._has_stream_consumers():
                             self._mute_post_response = True
                         elif self._should_emit_quiet_tool_messages():
