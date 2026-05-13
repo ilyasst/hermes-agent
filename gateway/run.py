@@ -13866,6 +13866,26 @@ class GatewayRunner:
             # Return final response, or a message if something went wrong
             final_response = result.get("final_response")
 
+            # [LOCAL] Patch I 2026-05-12: strip leaked next-user-turn headers
+            # from the assistant's final response. Local Qwen3.5 via llama-server
+            # with --jinja occasionally generates "\nuser\n[<user_name>] ..."
+            # past the assistant stop boundary; without this, the platform sees
+            # the bot literally echo "[ilyass] nudge" or similar as its reply.
+            # run_agent.py adds matching stop sequences proactively (Patch I);
+            # this strip is the safety net for any leak that gets past.
+            if final_response and isinstance(final_response, str):
+                _leak_re = re.compile(
+                    r"(?ms)(?:\A|\n)\s*user\s*\n\s*\[[^\]\n]+\][^\n]*(?:\n.*)?$"
+                )
+                _stripped = _leak_re.sub("", final_response).rstrip()
+                if _stripped != final_response:
+                    logger.warning(
+                        "Stripped leaked user-turn header from final_response "
+                        "(before=%d chars, after=%d chars)",
+                        len(final_response), len(_stripped),
+                    )
+                    final_response = _stripped or None
+
             # Extract actual token counts from the agent instance used for this run
             _last_prompt_toks = 0
             _input_toks = 0

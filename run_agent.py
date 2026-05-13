@@ -10720,6 +10720,11 @@ class AIAgent:
         self._post_tool_empty_last_emit_ts = 0.0
         self._last_content_with_tools = None
         self._last_content_tools_all_housekeeping = False
+        # [LOCAL PATCH H+ 2026-05-10] Deferred fallback for housekeeping tool
+        # turns: saved at nudge time, used as last resort if the post-tool
+        # nudge does NOT recover. Closes the silent-mid-task-termination
+        # bug class on top of the housekeeping gate. See upstream #7968.
+        self._deferred_post_tool_fallback = None
         self._mute_post_response = False
         self._unicode_sanitization_passes = 0
         self._tool_guardrails.reset_for_turn()
@@ -10924,6 +10929,7 @@ class AIAgent:
                     self._thinking_prefill_retries = 0
                     self._last_content_with_tools = None
                     self._last_content_tools_all_housekeeping = False
+                    self._deferred_post_tool_fallback = None  # [LOCAL PATCH H+]
                     self._mute_post_response = False
                     # Re-estimate after compression
                     _preflight_tokens = estimate_request_tokens_rough(
@@ -11385,6 +11391,7 @@ class AIAgent:
                         self._thinking_prefill_retries = 0
                         self._last_content_with_tools = None
                         self._last_content_tools_all_housekeeping = False
+                        self._deferred_post_tool_fallback = None  # [LOCAL PATCH H+]
                         self._mute_post_response = False
                         api_call_count -= 1  # don't burn a budget slot on the rebuild
                         continue
@@ -11493,6 +11500,28 @@ class AIAgent:
                         _sanitize_structure_non_ascii(api_kwargs)
                     if self.api_mode == "codex_responses":
                         api_kwargs = self._get_transport().preflight_kwargs(api_kwargs, allow_stream=False)
+
+                    # [LOCAL] Patch I 2026-05-12: Belt-and-suspenders against
+                    # chat-template user-prefix leaks. Local Qwen3.5 served
+                    # via llama-server with --jinja occasionally generates the
+                    # next user turn header ("\nuser\n[<user_name>] ...") as
+                    # continuation past the assistant stop boundary, and the
+                    # gateway sends that verbatim to the platform. Adding
+                    # explicit stop sequences cuts generation at the marker.
+                    # Gateway/run.py strips the same patterns post-hoc as a
+                    # safety net. Disable via HERMES_DISABLE_USER_PREFIX_STOP=1.
+                    if (
+                        self.api_mode == "chat_completions"
+                        and os.environ.get("HERMES_DISABLE_USER_PREFIX_STOP", "0") not in ("1", "true", "yes")
+                    ):
+                        _user_prefix_stops = ["\nuser\n[", "\n\nuser\n"]
+                        _existing_stop = api_kwargs.get("stop")
+                        if _existing_stop is None:
+                            api_kwargs["stop"] = _user_prefix_stops
+                        elif isinstance(_existing_stop, str):
+                            api_kwargs["stop"] = [_existing_stop] + _user_prefix_stops
+                        elif isinstance(_existing_stop, list):
+                            api_kwargs["stop"] = list(_existing_stop) + _user_prefix_stops
 
                     try:
                         from hermes_cli.plugins import invoke_hook as _invoke_hook
@@ -13710,6 +13739,10 @@ class AIAgent:
                     # flag so it can fire again if the model goes empty on
                     # a LATER tool round.
                     self._post_tool_empty_retried = False
+                    # [LOCAL PATCH H+] Deferred fallback is per-tool-round.
+                    # Clear it so a stale narration from an earlier round
+                    # cannot be promoted to final answer in a later round.
+                    self._deferred_post_tool_fallback = None
 
                     messages.append(assistant_msg)
                     self._emit_interim_assistant_message(assistant_msg)
@@ -13845,29 +13878,33 @@ class AIAgent:
                             self._response_was_previewed = True
                             break
 
-                        # If the previous turn already delivered real content alongside
-                        # HOUSEKEEPING tool calls (e.g. "You're welcome!" + memory save),
-                        # the model has nothing more to say. Use the earlier content
-                        # immediately instead of wasting API calls on retries.
-                        # NOTE: Only use this shortcut when ALL tools in that turn were
-                        # housekeeping (memory, todo, etc.).  When substantive tools
-                        # were called (terminal, search_files, etc.), the content was
-                        # likely mid-task narration ("I'll scan the directory...") and
-                        # the empty follow-up means the model choked — let the
-                        # post-tool nudge below handle that instead of exiting early.
-                        fallback = getattr(self, '_last_content_with_tools', None)
-                        if fallback and getattr(self, '_last_content_tools_all_housekeeping', False):
-                            _turn_exit_reason = "fallback_prior_turn_content"
-                            logger.info("Empty follow-up after tool calls — using prior turn content as final response")
-                            self._emit_status("↻ Empty response after tool calls — using earlier content as final answer")
+                        # [LOCAL PATCH H+ 2026-05-10] Deferred housekeeping fallback.
+                        # If the previous turn delivered content alongside HOUSEKEEPING
+                        # tool calls (e.g. "You're welcome!" + memory save), the model
+                        # may have nothing more to say.  Original code used that content
+                        # as the final answer IMMEDIATELY on the first empty response —
+                        # short-circuiting the retry pipeline and causing silent
+                        # mid-task termination on transient empties (upstream #7968 P1,
+                        # still OPEN).  We now treat it as a TRUE last resort: only
+                        # promote the prior content after the post-tool nudge has been
+                        # tried and the model still returned empty.  The deferred
+                        # variable is set in the nudge path below; reset on each
+                        # successful tool turn.
+                        deferred = getattr(self, '_deferred_post_tool_fallback', None)
+                        if deferred and getattr(self, '_post_tool_empty_retried', False):
+                            _turn_exit_reason = "fallback_prior_turn_content_after_nudge"
+                            logger.info(
+                                "Empty follow-up persists after post-tool nudge — "
+                                "using prior turn content as final response"
+                            )
+                            self._emit_status(
+                                "↻ Empty after retry — using earlier content as final answer"
+                            )
+                            self._deferred_post_tool_fallback = None
                             self._last_content_with_tools = None
                             self._last_content_tools_all_housekeeping = False
                             self._empty_content_retries = 0
-                            # Do NOT modify the assistant message content — the
-                            # old code injected "Calling the X tools..." which
-                            # poisoned the conversation history.  Just use the
-                            # fallback text as the final response and break.
-                            final_response = self._strip_think_blocks(fallback).strip()
+                            final_response = self._strip_think_blocks(deferred).strip()
                             self._response_was_previewed = True
                             break
 
@@ -13906,6 +13943,19 @@ class AIAgent:
                             and not _has_inline_thinking  # thinking model still working — let prefill handle
                         ):
                             self._post_tool_empty_retried = True
+                            # [LOCAL PATCH H+ 2026-05-10] Save the housekeeping
+                            # narration as a deferred fallback BEFORE clearing
+                            # the live capture.  If this nudge does NOT recover
+                            # (i.e., model returns empty again on the next
+                            # iteration), the deferred check above will use it
+                            # as a true last-resort final answer instead of
+                            # falling through to the "(empty)" terminal.
+                            # Substantive-tool turns don't qualify — only when
+                            # _last_content_tools_all_housekeeping was True.
+                            if getattr(self, '_last_content_tools_all_housekeeping', False):
+                                self._deferred_post_tool_fallback = (
+                                    self._last_content_with_tools
+                                )
                             # Clear stale narration so it doesn't resurface
                             # on a later empty response after the nudge.
                             self._last_content_with_tools = None
