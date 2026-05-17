@@ -209,26 +209,20 @@ def check_todo_requirements() -> bool:
 TODO_SCHEMA = {
     "name": "todo",
     "description": (
-        "Manage your task list for the current session. Use for complex tasks "
-        "with 3+ steps or when the user provides multiple tasks. "
-        "Call with no parameters to read the current list.\n\n"
-        "Writing:\n"
-        "- Provide 'todos' array to create/update items\n"
-        "- merge=false (default): replace the entire list with a fresh plan\n"
-        "- merge=true: update existing items by id, add any new ones\n\n"
-        "Each item: {id: string, content: string, "
-        "status: pending|in_progress|completed|cancelled}\n"
-        "List order is priority. Only ONE item in_progress at a time.\n"
-        "Mark items completed immediately when done. If something fails, "
-        "cancel it and add a revised item.\n\n"
-        "Always returns the full current list."
+        "Task list for the current session. Use for tasks with 3+ steps or when "
+        "the user provides multiple tasks. No args = read current list. Provide "
+        "'todos' to write: merge=false (default) replaces the whole list with a "
+        "fresh plan; merge=true updates existing items by id and adds new ones. "
+        "List order is priority; only ONE item in_progress at a time. Mark items "
+        "completed immediately when done; if something fails, cancel it and add a "
+        "revised item. Always returns the full current list."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "todos": {
                 "type": "array",
-                "description": "Task items to write. Omit to read current list.",
+                "description": "Items to write; omit to read current list.",
                 "items": {
                     "type": "object",
                     "properties": {
@@ -243,7 +237,6 @@ TODO_SCHEMA = {
                         "status": {
                             "type": "string",
                             "enum": ["pending", "in_progress", "completed", "cancelled"],
-                            "description": "Current status"
                         }
                     },
                     "required": ["id", "content", "status"]
@@ -251,10 +244,6 @@ TODO_SCHEMA = {
             },
             "merge": {
                 "type": "boolean",
-                "description": (
-                    "true: update existing items by id, add new ones. "
-                    "false (default): replace the entire list."
-                ),
                 "default": False
             }
         },
