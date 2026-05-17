@@ -1155,9 +1155,14 @@ PATCH_SCHEMA = {
     },
 }
 
+# [LOCAL MOD 2026-04-05] Explicit target='content' vs target='files'
+# warning. Agents defaulted to target='content' while searching for
+# filename patterns like 'run_agent\.py', got 0 results, and looped in
+# reasoning. Kept terse per the schema-trim pass — the target= warning is
+# the behaviour-critical part.
 SEARCH_FILES_SCHEMA = {
     "name": "search_files",
-    "description": "Search file contents or find files by name. Use this instead of grep/rg/find/ls in terminal. Ripgrep-backed, faster than shell equivalents.\n\nContent search (target='content'): Regex search inside files. Output modes: full matches with line numbers, file paths only, or match counts.\n\nFile search (target='files'): Find files by glob pattern (e.g., '*.py', '*config*'). Also use this instead of ls — results sorted by modification time.",
+    "description": "Search file CONTENTS (regex) OR find files by NAME (glob). Ripgrep-backed. Use instead of grep/rg/find/ls.\n\nTWO modes via `target`:\n- target='content' (DEFAULT): regex matched INSIDE files; returns matching lines with line numbers.\n- target='files': glob matched against FILENAMES (e.g. '*.py', '*run_agent*'); use instead of ls (sorted by mtime).\n\n⚠️ Looking for a FILE by name -> you MUST set target='files'. A filename regex like 'run_agent\\\\.py' under the default content mode returns ZERO results (it searches inside files for that string).",
     "parameters": {
         "type": "object",
         "properties": {
