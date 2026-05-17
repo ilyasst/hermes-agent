@@ -55,7 +55,11 @@ CONFIGURABLE_TOOLSETS = [
     ("web",             "🔍 Web Search & Scraping",    "web_search, web_extract"),
     ("browser",         "🌐 Browser Automation",       "navigate, click, type, scroll"),
     ("terminal",        "💻 Terminal & Processes",      "terminal, process"),
-    ("file",            "📁 File Operations",           "read, write, patch, search"),
+    ("file",            "📁 File Operations",           "write, patch, search"),
+    # [LOCAL MOD] read_file split into its own configurable toolset so
+    # constrained / Telegram-context nodes can disable it (forces bash
+    # `wc -l`/`grep` for file inspection) while keeping write/patch/search.
+    ("file_read",       "📖 File Read (read_file)",      "read_file — disable on constrained nodes to force bash"),
     ("code_execution",  "⚡ Code Execution",            "execute_code"),
     ("vision",          "👁️  Vision / Image Analysis",  "vision_analyze"),
     ("video",           "🎬 Video Analysis",            "video_analyze (requires video-capable model)"),

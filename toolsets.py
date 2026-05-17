@@ -34,6 +34,11 @@ _HERMES_CORE_TOOLS = [
     # Terminal + process management
     "terminal", "process",
     # File manipulation
+    # [LOCAL MOD] read_file is registered under the "file_read" toolset
+    # (tools/file_tools.py) so constrained nodes can opt out. It stays listed
+    # here so full platforms that resolve composite toolsets keep it by
+    # default (no regression); constrained nodes drop it via the per-platform
+    # `platform_toolsets` config (omit the "file_read" configurable toolset).
     "read_file", "write_file", "patch", "search_files",
     # Vision + image generation
     "vision_analyze", "image_generate",
@@ -184,9 +189,27 @@ TOOLSETS = {
     },
 
     
+    # [LOCAL MOD] read_file split out into the "file_read" toolset below so
+    # constrained / Telegram-context nodes can keep write/patch/search while
+    # excluding read_file (forces bash `wc -l`/`grep` for file inspection
+    # instead of loading whole files into context). The registry also tags
+    # read_file under toolset="file_read" (tools/file_tools.py); get_toolset()
+    # unions the static list with the registry tag, so "file" must NOT list
+    # read_file here or the union would re-add it on constrained nodes.
     "file": {
-        "description": "File manipulation tools: read, write, patch (with fuzzy matching), and search (content + files)",
-        "tools": ["read_file", "write_file", "patch", "search_files"],
+        "description": "File manipulation tools: write, patch (with fuzzy matching), and search (content + files). read_file is in the separate 'file_read' toolset.",
+        "tools": ["write_file", "patch", "search_files"],
+        "includes": []
+    },
+
+    # [LOCAL MOD] Standalone read_file toolset. Full nodes keep it enabled
+    # (it is in _HERMES_CORE_TOOLS, so composite resolution + subset inference
+    # auto-enable it by default — no regression). Constrained nodes omit
+    # "file_read" from their per-platform `platform_toolsets` config so the
+    # small local model favors bash/compound commands over whole-file reads.
+    "file_read": {
+        "description": "File reading tool (read_file). Split from 'file' so constrained nodes can opt out and force bash-based file inspection.",
+        "tools": ["read_file"],
         "includes": []
     },
     
