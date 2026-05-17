@@ -2024,6 +2024,11 @@ class AIAgent:
         #     patch_f_inloop_compression: false
         #     patch_g_narrate_detector: false
         #     patch_j_truncate_oversized_read: false
+        #     patch_k_suppress_predelivery_narrate: false
+        #       # Suppress bare narrate-without-action / reasoning-only-JSON
+        #       # turns from user delivery (routes them into Patch G's
+        #       # nudge/continue instead). Default true. Env kill-switch:
+        #       # HERMES_DISABLE_PREDELIVERY_NARRATE_GUARD=1
         # When LCM (hermes-lcm) is the active context engine, D and F never
         # execute regardless of these flags (legacy compressor path is dead).
         self._local_patches = _agent_cfg.get("local_patches") or {}
@@ -4020,6 +4025,109 @@ class AIAgent:
         tail = text[-150:]
         return any(p.search(tail) for p in self._NARRATE_TAIL_PATTERNS)
     # [/LOCAL PATCH G]
+
+    # [LOCAL PATCH K — 2026-05-17] Pre-delivery narrate/bare-thought guard.
+    #
+    # Real incident: outerheaven session_20260515_112927_2bcd28 msg 43 — the
+    # assistant `content` was a bare JSON object `{"thought": "..."}` with NO
+    # tool_calls and NO reasoning_content, and it was DELIVERED verbatim to the
+    # Telegram user. The loop self-corrected on a LATER turn (Patch G fired at
+    # msg 44, recovery at msg 45) but the offending bare-reasoning turn had
+    # already reached the user. Patch G's tail-pattern detector misses this
+    # class: a JSON blob like {"thought": "..."} ends in `"}` so it matches
+    # none of _NARRATE_TAIL_PATTERNS and is accepted as the final answer.
+    #
+    # This adds a NARROW second classifier — bare-reasoning-JSON — and wires it
+    # into the SAME existing Patch-G nudge/continue acceptance gate (the nudge
+    # mechanics are unchanged; only the set of turns that route into it widens).
+    # A defensive strip also runs at the gateway delivery boundary as a
+    # belt-and-suspenders net for any such turn that exhausts the retry budget.
+
+    # Keys that, when they are the sole/lead key of a bare JSON object, mark
+    # the content as pure model scratchpad rather than a user-facing answer.
+    _PATCH_K_REASONING_KEYS = frozenset({
+        "thought", "thoughts", "reasoning", "plan", "scratchpad", "analysis",
+    })
+    # Keys whose presence means the JSON object DOES carry a user answer, so
+    # it must NOT be suppressed even if it also has a reasoning key.
+    _PATCH_K_ANSWER_KEYS = frozenset({
+        "answer", "response", "reply", "message", "text", "output",
+        "final", "final_answer", "result", "content",
+    })
+
+    def _looks_like_bare_reasoning_json(self, content: str) -> bool:
+        """Detect a turn whose entire content is a bare reasoning-only JSON object.
+
+        True only when the *whole* stripped content parses as a single JSON
+        object AND that object's only/lead key is one of
+        _PATCH_K_REASONING_KEYS AND it carries NO answer-bearing key from
+        _PATCH_K_ANSWER_KEYS. This is deliberately narrow:
+
+          - Plain prose that merely contains the word "thought" is NOT JSON,
+            so json.loads() raises and we return False (delivered).
+          - A real structured answer like {"answer": "..."} has an answer
+            key, so it is NOT suppressed (delivered).
+          - {"thought": "...", "answer": "..."} has an answer key → delivered.
+          - {"thought": "..."} (the exact leaked shape) → suppressed.
+          - Empty / whitespace content → False (existing behavior unaffected).
+        """
+        if not content:
+            return False
+        text = self._strip_think_blocks(content).strip()
+        if not text:
+            return False
+        # Cheap reject: a bare JSON object must start with '{' and end with '}'.
+        if not (text.startswith("{") and text.endswith("}")):
+            return False
+        try:
+            obj = json.loads(text)
+        except (ValueError, TypeError):
+            return False
+        if not isinstance(obj, dict) or not obj:
+            return False
+        keys_lower = [str(k).strip().lower() for k in obj.keys()]
+        # If the object carries any answer-bearing key, it may be a real
+        # (if oddly formatted) answer — never suppress.
+        if any(k in self._PATCH_K_ANSWER_KEYS for k in keys_lower):
+            return False
+        # Sole key, or lead key, is a reasoning key, and every key is a
+        # reasoning key (no unknown key that might hold the real answer).
+        if not all(k in self._PATCH_K_REASONING_KEYS for k in keys_lower):
+            return False
+        return keys_lower[0] in self._PATCH_K_REASONING_KEYS
+
+    def _patch_k_enabled(self) -> bool:
+        """Config gate + env kill-switch, mirroring Patch I's convention."""
+        if os.environ.get("HERMES_DISABLE_PREDELIVERY_NARRATE_GUARD"):
+            return False
+        return bool(
+            self._local_patches.get("patch_k_suppress_predelivery_narrate", True)
+        )
+
+    def _should_suppress_predelivery_turn(
+        self, content: str, has_tool_calls: bool, finish_reason: str,
+    ) -> bool:
+        """Patch K predicate: should this assistant turn be kept from the user?
+
+        Suppress iff Patch K is enabled AND the turn has no tool_calls AND it
+        stopped normally AND it is EITHER a bare reasoning-only JSON object OR
+        matches the existing Patch-G narrate-without-action classifier.
+        Reuses _looks_like_narrate_without_action rather than duplicating it.
+        """
+        if not self._patch_k_enabled():
+            return False
+        if has_tool_calls:
+            return False
+        if finish_reason != "stop":
+            return False
+        if not content or not content.strip():
+            return False
+        if self._looks_like_bare_reasoning_json(content):
+            return True
+        if self._looks_like_narrate_without_action(content):
+            return True
+        return False
+    # [/LOCAL PATCH K]
 
 
     def _extract_reasoning(self, assistant_message) -> Optional[str]:
@@ -16037,6 +16145,67 @@ class AIAgent:
                         self._save_session_log(messages)
                         continue
                     # [/LOCAL PATCH G]
+
+                    # [LOCAL PATCH K — 2026-05-17] Pre-delivery narrate /
+                    # bare-reasoning-JSON guard. Patch G above only catches
+                    # tail-pattern narration ("Let me X:"); it does NOT catch
+                    # a turn whose entire content is a bare reasoning-only
+                    # JSON object like {"thought": "..."} (it ends in `"}` so
+                    # no tail pattern matches), which is exactly the
+                    # outerheaven session_20260515_112927 msg 43 incident:
+                    # that blob was DELIVERED to the user before the loop
+                    # self-corrected on a later turn. Route this class into
+                    # the SAME nudge/continue acceptance gate so the bad turn
+                    # is never accepted as final_response and the existing
+                    # internal retry produces the real user-facing answer.
+                    # The nudge mechanics are unchanged — only the set of
+                    # turns that enter the retry widens. Gate + env
+                    # kill-switch live in _should_suppress_predelivery_turn.
+                    # Reuse Patch G's retry budget so a stuck model can't
+                    # loop forever; beyond the budget the gateway-side
+                    # defensive strip is the final net.
+                    if (
+                        narrate_no_action_retries < 2
+                        and not getattr(assistant_message, "tool_calls", None)
+                        and self._should_suppress_predelivery_turn(
+                            final_response,
+                            has_tool_calls=bool(
+                                getattr(assistant_message, "tool_calls", None)
+                            ),
+                            finish_reason=finish_reason,
+                        )
+                    ):
+                        narrate_no_action_retries += 1
+                        logger.info(
+                            "[LOCAL PATCH K] pre-delivery narrate/bare-thought "
+                            "turn suppressed (%d/2), nudging. head=%r",
+                            narrate_no_action_retries,
+                            (final_response or "")[:120],
+                        )
+                        self._emit_status(
+                            f"↻ Reasoning-only turn suppressed — nudging "
+                            f"({narrate_no_action_retries}/2)"
+                        )
+                        interim_msg = self._build_assistant_message(
+                            assistant_message, "incomplete",
+                        )
+                        messages.append(interim_msg)
+                        self._emit_interim_assistant_message(interim_msg)
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "[System: Your previous response contained only "
+                                "internal reasoning / a scratchpad (no answer "
+                                "for the user and no tool_call). Do not send "
+                                "raw reasoning to the user. Either emit the "
+                                "tool_call to actually do the work, or reply "
+                                "now with a concrete, user-facing answer.]"
+                            ),
+                        })
+                        self._session_messages = messages
+                        self._save_session_log(messages)
+                        continue
+                    # [/LOCAL PATCH K]
 
                     if truncated_response_parts:
                         final_response = "".join(truncated_response_parts) + final_response

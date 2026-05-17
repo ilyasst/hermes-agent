@@ -15835,6 +15835,47 @@ class GatewayRunner:
                     )
                     final_response = _stripped or None
 
+            # [LOCAL] Patch K 2026-05-17: defensive pre-delivery net for
+            # narrate-without-action / bare-reasoning-JSON turns. The primary
+            # fix lives in run_agent.py's acceptance gate (routes such turns
+            # into Patch G's nudge/continue so the model produces a real
+            # answer). This is the belt-and-suspenders for the rare case the
+            # bad turn still reaches delivery — e.g. the 2-retry nudge budget
+            # was exhausted and the model kept emitting a bare {"thought":...}
+            # blob. Real incident: outerheaven session_20260515_112927 msg 43.
+            # Reuses the same predicate (no logic duplicated). Gate +
+            # env kill-switch HERMES_DISABLE_PREDELIVERY_NARRATE_GUARD.
+            if final_response and isinstance(final_response, str):
+                _pk_agent = agent_holder[0]
+                _pk_pred = getattr(
+                    _pk_agent, "_should_suppress_predelivery_turn", None
+                )
+                if callable(_pk_pred):
+                    try:
+                        _pk_suppress = _pk_pred(
+                            final_response,
+                            has_tool_calls=False,
+                            finish_reason="stop",
+                        )
+                    except Exception as _pk_exc:
+                        logger.warning(
+                            "Patch K predicate raised, not suppressing: %s",
+                            _pk_exc,
+                        )
+                        _pk_suppress = False
+                    if _pk_suppress:
+                        logger.warning(
+                            "[LOCAL PATCH K] suppressed bare narrate/"
+                            "reasoning-JSON turn at delivery boundary "
+                            "(len=%d, head=%r)",
+                            len(final_response), final_response[:120],
+                        )
+                        final_response = (
+                            "I started working on that but didn't finish a "
+                            "clear answer. Could you re-send or rephrase your "
+                            "request?"
+                        )
+
             # Extract actual token counts from the agent instance used for this run
             _last_prompt_toks = 0
             _input_toks = 0
