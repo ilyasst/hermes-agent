@@ -12274,8 +12274,21 @@ class AIAgent:
         self._codex_incomplete_retries = 0
         self._thinking_prefill_retries = 0
         self._post_tool_empty_retried = False
+        # [LOCAL PATCH H — 2026-05-08] Throttle Telegram visibility of post-tool
+        # empty-response nudges. Recovery still fires every round (the
+        # mechanism is unchanged), but the Telegram '⚠️ nudging to continue'
+        # status only emits on the FIRST nudge and again after a quiet window.
+        # (NB: these reset per-turn with the rest of this block — the throttle
+        # is per-turn, matching the pre-rebase fork behaviour.)
+        self._post_tool_empty_total = 0
+        self._post_tool_empty_last_emit_ts = 0.0
         self._last_content_with_tools = None
         self._last_content_tools_all_housekeeping = False
+        # [LOCAL PATCH H+ 2026-05-10] Deferred fallback for housekeeping tool
+        # turns: saved at nudge time, used as last resort if the post-tool
+        # nudge does NOT recover. Closes the silent-mid-task-termination
+        # bug class on top of the housekeeping gate. See upstream #7968.
+        self._deferred_post_tool_fallback = None
         self._mute_post_response = False
         self._unicode_sanitization_passes = 0
         self._tool_guardrails.reset_for_turn()
@@ -12507,6 +12520,7 @@ class AIAgent:
                     self._thinking_prefill_retries = 0
                     self._last_content_with_tools = None
                     self._last_content_tools_all_housekeeping = False
+                    self._deferred_post_tool_fallback = None  # [LOCAL PATCH H+]
                     self._mute_post_response = False
                     # Re-estimate after compression
                     _preflight_tokens = estimate_request_tokens_rough(
@@ -13013,6 +13027,7 @@ class AIAgent:
                         self._thinking_prefill_retries = 0
                         self._last_content_with_tools = None
                         self._last_content_tools_all_housekeeping = False
+                        self._deferred_post_tool_fallback = None  # [LOCAL PATCH H+]
                         self._mute_post_response = False
                         api_call_count -= 1  # don't burn a budget slot on the rebuild
                         continue
@@ -15467,11 +15482,25 @@ class AIAgent:
                         _HOUSEKEEPING_TOOLS = frozenset({
                             "memory", "todo", "skill_manage", "session_search",
                         })
+                        # [LOCAL PATCH H — 2026-05-10] todo/todo_* is excluded
+                        # from the FALLBACK set: a todo at the START of multi-
+                        # step work is intent-to-act, so an empty follow-up
+                        # should nudge the model to continue, not promote the
+                        # narration ("Got it, setting up...") to final answer.
+                        # Muting (below) still uses the full _HOUSEKEEPING_TOOLS
+                        # so display UX is unchanged.
+                        _FALLBACK_HOUSEKEEPING_TOOLS = frozenset({
+                            "memory", "skill_manage", "session_search",
+                        })
                         _all_housekeeping = all(
                             tc.function.name in _HOUSEKEEPING_TOOLS
                             for tc in assistant_message.tool_calls
                         )
-                        self._last_content_tools_all_housekeeping = _all_housekeeping
+                        _all_fallback_housekeeping = all(
+                            tc.function.name in _FALLBACK_HOUSEKEEPING_TOOLS
+                            for tc in assistant_message.tool_calls
+                        )
+                        self._last_content_tools_all_housekeeping = _all_fallback_housekeeping
                         if _all_housekeeping and self._has_stream_consumers():
                             self._mute_post_response = True
                         elif self._should_emit_quiet_tool_messages():
@@ -15504,6 +15533,10 @@ class AIAgent:
                     # flag so it can fire again if the model goes empty on
                     # a LATER tool round.
                     self._post_tool_empty_retried = False
+                    # [LOCAL PATCH H+] Deferred fallback is per-tool-round.
+                    # Clear it so a stale narration from an earlier round
+                    # cannot be promoted to final answer in a later round.
+                    self._deferred_post_tool_fallback = None
 
                     messages.append(assistant_msg)
                     self._emit_interim_assistant_message(assistant_msg)
@@ -15639,21 +15672,29 @@ class AIAgent:
                             self._response_was_previewed = True
                             break
 
-                        # If the previous turn already delivered real content alongside
-                        # HOUSEKEEPING tool calls (e.g. "You're welcome!" + memory save),
-                        # the model has nothing more to say. Use the earlier content
-                        # immediately instead of wasting API calls on retries.
-                        # NOTE: Only use this shortcut when ALL tools in that turn were
-                        # housekeeping (memory, todo, etc.).  When substantive tools
-                        # were called (terminal, search_files, etc.), the content was
-                        # likely mid-task narration ("I'll scan the directory...") and
-                        # the empty follow-up means the model choked — let the
-                        # post-tool nudge below handle that instead of exiting early.
-                        fallback = getattr(self, '_last_content_with_tools', None)
-                        if fallback and getattr(self, '_last_content_tools_all_housekeeping', False):
-                            _turn_exit_reason = "fallback_prior_turn_content"
-                            logger.info("Empty follow-up after tool calls — using prior turn content as final response")
-                            self._emit_status("↻ Empty response after tool calls — using earlier content as final answer")
+                        # [LOCAL PATCH H+ 2026-05-10] Deferred housekeeping fallback.
+                        # If the previous turn delivered content alongside HOUSEKEEPING
+                        # tool calls (e.g. "You're welcome!" + memory save), the model
+                        # may have nothing more to say.  Original code used that content
+                        # as the final answer IMMEDIATELY on the first empty response —
+                        # short-circuiting the retry pipeline and causing silent
+                        # mid-task termination on transient empties (upstream #7968 P1,
+                        # still OPEN).  We now treat it as a TRUE last resort: only
+                        # promote the prior content after the post-tool nudge has been
+                        # tried and the model still returned empty.  The deferred
+                        # variable is set in the nudge path below; reset on each
+                        # successful tool turn / compression.
+                        deferred = getattr(self, '_deferred_post_tool_fallback', None)
+                        if deferred and getattr(self, '_post_tool_empty_retried', False):
+                            _turn_exit_reason = "fallback_prior_turn_content_after_nudge"
+                            logger.info(
+                                "Empty follow-up persists after post-tool nudge — "
+                                "using prior turn content as final response"
+                            )
+                            self._emit_status(
+                                "↻ Empty after retry — using earlier content as final answer"
+                            )
+                            self._deferred_post_tool_fallback = None
                             self._last_content_with_tools = None
                             self._last_content_tools_all_housekeeping = False
                             self._empty_content_retries = 0
@@ -15661,7 +15702,7 @@ class AIAgent:
                             # old code injected "Calling the X tools..." which
                             # poisoned the conversation history.  Just use the
                             # fallback text as the final response and break.
-                            final_response = self._strip_think_blocks(fallback).strip()
+                            final_response = self._strip_think_blocks(deferred).strip()
                             self._response_was_previewed = True
                             break
 
@@ -15700,18 +15741,59 @@ class AIAgent:
                             and not _has_inline_thinking  # thinking model still working — let prefill handle
                         ):
                             self._post_tool_empty_retried = True
+                            # [LOCAL PATCH H+ 2026-05-10] Save the housekeeping
+                            # narration as a deferred fallback BEFORE clearing
+                            # the live capture.  If this nudge does NOT recover
+                            # (model returns empty again on the next iteration),
+                            # the deferred check above will use it as a true
+                            # last-resort final answer instead of falling
+                            # through to the "(empty)" terminal.  Only when
+                            # _last_content_tools_all_housekeeping was True
+                            # (substantive-tool turns don't qualify).
+                            if getattr(self, '_last_content_tools_all_housekeeping', False):
+                                self._deferred_post_tool_fallback = (
+                                    self._last_content_with_tools
+                                )
                             # Clear stale narration so it doesn't resurface
                             # on a later empty response after the nudge.
                             self._last_content_with_tools = None
                             self._last_content_tools_all_housekeeping = False
+                            # [LOCAL PATCH H — 2026-05-08] Track running count +
+                            # cooldown so Telegram emit only fires on the first
+                            # nudge and on subsequent nudges that cross the
+                            # cooldown window. Recovery itself is unchanged —
+                            # only the visible status throttles.
+                            # Gate: local_patches.patch_h_quiet_post_tool_nudge
+                            # (default true). When disabled, every nudge emits.
+                            _pth_quiet = self._local_patches.get(
+                                "patch_h_quiet_post_tool_nudge", True
+                            )
+                            self._post_tool_empty_total = getattr(
+                                self, "_post_tool_empty_total", 0
+                            ) + 1
+                            _pth_now = time.time()
+                            _pth_cooldown_s = 300.0  # 5 min between Telegram emits
+                            _pth_emit = (
+                                (not _pth_quiet)
+                                or self._post_tool_empty_total == 1
+                                or (_pth_now - getattr(self, "_post_tool_empty_last_emit_ts", 0.0)) > _pth_cooldown_s
+                            )
                             logger.info(
-                                "Empty response after tool calls — nudging model "
-                                "to continue processing"
+                                "Empty response after tool calls (#%d) — "
+                                "nudging model to continue processing "
+                                "(emit_to_user=%s)",
+                                self._post_tool_empty_total, _pth_emit,
                             )
-                            self._emit_status(
-                                "⚠️ Model returned empty after tool calls — "
-                                "nudging to continue"
-                            )
+                            if _pth_emit:
+                                self._post_tool_empty_last_emit_ts = _pth_now
+                                self._emit_status(
+                                    "⚠️ Model returned empty after tool calls — "
+                                    "nudging to continue"
+                                    + (
+                                        f" (#{self._post_tool_empty_total} this session)"
+                                        if self._post_tool_empty_total > 1 else ""
+                                    )
+                                )
                             # Append the empty assistant message first so the
                             # message sequence stays valid:
                             #   tool(result) → assistant("(empty)") → user(nudge)
