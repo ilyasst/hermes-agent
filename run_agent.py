@@ -4106,6 +4106,7 @@ class AIAgent:
 
     def _should_suppress_predelivery_turn(
         self, content: str, has_tool_calls: bool, finish_reason: str,
+        bare_json_only: bool = False,
     ) -> bool:
         """Patch K predicate: should this assistant turn be kept from the user?
 
@@ -4124,7 +4125,12 @@ class AIAgent:
             return False
         if self._looks_like_bare_reasoning_json(content):
             return True
-        if self._looks_like_narrate_without_action(content):
+        # [LOCAL PATCH K scope 2026-05-17] narrate-without-action
+        # is suppressed only IN-LOOP (routes into Patch-G nudge);
+        # at the delivery boundary the gateway passes
+        # bare_json_only=True so a legit short answer ending in
+        # 'Let me…/colon' is never replaced by a fallback.
+        if not bare_json_only and self._looks_like_narrate_without_action(content):
             return True
         return False
     # [/LOCAL PATCH K]

@@ -15856,6 +15856,7 @@ class GatewayRunner:
                             final_response,
                             has_tool_calls=False,
                             finish_reason="stop",
+                            bare_json_only=True,  # [LOCAL PATCH K scope] boundary = bare-JSON only
                         )
                     except Exception as _pk_exc:
                         logger.warning(
