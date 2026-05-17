@@ -3222,8 +3222,14 @@ class GatewayRunner:
     # SessionStore.suspend_recently_active() on crash recovery (no
     # .clean_shutdown marker).  All three mean "the agent was mid-turn and
     # we killed it" — eligible for startup auto-resume.
+    # [LOCAL PATCH B — 2026-04-29] "api_failure" added so Patch-B-marked
+    # sessions (max_retries-exhausted per-call API failure left mid-tool)
+    # are also picked up by the startup auto-resume path, not only the
+    # next-user-message reason-aware note. See mark_resume_pending(reason=
+    # "api_failure") companion below + run_agent.py failure_kind return.
     _AUTO_RESUME_REASONS = frozenset(
-        {"restart_timeout", "shutdown_timeout", "restart_interrupted"}
+        {"restart_timeout", "shutdown_timeout", "restart_interrupted",
+         "api_failure"}
     )
 
     def _schedule_resume_pending_sessions(self) -> int:
@@ -7924,6 +7930,43 @@ class GatewayRunner:
                     "message so conversation context is preserved on retry.",
                     session_entry.session_id,
                 )
+
+            # [LOCAL PATCH B — 2026-04-29] Mark session resume_pending on agent
+            # API-failure so the NEXT user message gets the auto-continue
+            # system note (the existing reason-aware branch in this file), and
+            # the startup auto-resume path (now includes "api_failure" in
+            # _AUTO_RESUME_REASONS) re-drives the turn. Without this, upstream
+            # auto-continue only fires for gateway-level interruptions
+            # (restart_timeout / shutdown_timeout / restart_interrupted).
+            # Per-call API timeouts that exhaust max_retries left the session
+            # mid-tool with no resume signal — the user's next "Continue"
+            # looked context-less to the model. Skipped for context-overflow /
+            # compression-exhausted failures (those auto-reset below — resuming
+            # would replay the oversized context). Companion: run_agent.py adds
+            # failure_kind="api_failure" to the failure return dict; the
+            # reason-phrase mapping below handles the new reason.
+            if (
+                agent_failed_early
+                and not is_context_overflow_failure
+                and not agent_result.get("compression_exhausted")
+                and session_entry
+                and session_key
+                and agent_result.get("failure_kind") == "api_failure"
+            ):
+                try:
+                    self.session_store.mark_resume_pending(
+                        session_key, reason="api_failure"
+                    )
+                    logger.info(
+                        "[LOCAL PATCH B] Marked session %s resume_pending=True "
+                        "(reason=api_failure) after agent failure.",
+                        session_entry.session_id,
+                    )
+                except Exception as _exc:
+                    logger.warning(
+                        "[LOCAL PATCH B] mark_resume_pending failed: %s", _exc,
+                    )
+            # [/LOCAL PATCH B]
 
             # When compression is exhausted, the session is permanently too
             # large to process.  Auto-reset it so the next message starts
@@ -15662,11 +15705,18 @@ class GatewayRunner:
 
             if _is_resume_pending:
                 _reason = getattr(_resume_entry, "resume_reason", None) or "restart_timeout"
+                # [LOCAL PATCH B — 2026-04-29] Added "api_failure" branch so the
+                # auto-continue note has accurate wording when our companion
+                # patch in this file marked the session resume_pending after a
+                # max_retries-exhausted API failure. If you remove that
+                # companion, this branch is harmless.
                 _reason_phrase = (
                     "a gateway restart"
                     if _reason == "restart_timeout"
                     else "a gateway shutdown"
                     if _reason == "shutdown_timeout"
+                    else "an API call failure (timeout or backend error)"
+                    if _reason == "api_failure"
                     else "a gateway interruption"
                 )
                 message = (
