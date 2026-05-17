@@ -12958,6 +12958,28 @@ class AIAgent:
                     if self.api_mode == "codex_responses":
                         api_kwargs = self._get_transport().preflight_kwargs(api_kwargs, allow_stream=False)
 
+                    # [LOCAL] Patch I 2026-05-12: Belt-and-suspenders against
+                    # chat-template user-prefix leaks. Local Qwen3.5 served
+                    # via llama-server with --jinja occasionally generates the
+                    # next user turn header ("\nuser\n[<user_name>] ...") as
+                    # continuation past the assistant stop boundary, and the
+                    # gateway sends that verbatim to the platform. Adding
+                    # explicit stop sequences cuts generation at the marker.
+                    # Gateway/run.py strips the same patterns post-hoc as a
+                    # safety net. Disable via HERMES_DISABLE_USER_PREFIX_STOP=1.
+                    if (
+                        self.api_mode == "chat_completions"
+                        and os.environ.get("HERMES_DISABLE_USER_PREFIX_STOP", "0") not in ("1", "true", "yes")
+                    ):
+                        _user_prefix_stops = ["\nuser\n[", "\n\nuser\n"]
+                        _existing_stop = api_kwargs.get("stop")
+                        if _existing_stop is None:
+                            api_kwargs["stop"] = _user_prefix_stops
+                        elif isinstance(_existing_stop, str):
+                            api_kwargs["stop"] = [_existing_stop] + _user_prefix_stops
+                        elif isinstance(_existing_stop, list):
+                            api_kwargs["stop"] = list(_existing_stop) + _user_prefix_stops
+
                     try:
                         from hermes_cli.plugins import invoke_hook as _invoke_hook
                         request_messages = api_kwargs.get("messages")
