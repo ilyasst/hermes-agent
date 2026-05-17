@@ -1498,6 +1498,58 @@ BROWSER_TOOL_SCHEMAS = [
             "required": []
         }
     },
+    # [LOCAL MOD] Tab lifecycle management tools.
+    {
+        "name": "browser_tab_list",
+        "description": "List all open tabs in the browser session. Returns tab IDs, titles, URLs, and which tab is currently active. Use this to understand what tabs are open before switching or closing tabs. Requires browser_navigate to be called first.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "name": "browser_tab_new",
+        "description": "Open a new browser tab and optionally navigate to a URL. Returns the new tab ID. If no URL is provided, opens a blank tab. The new tab becomes the active tab. Requires browser_navigate to be called first.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "Optional URL to navigate to in the new tab (e.g., 'https://example.com'). If not provided, opens a blank tab."
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "browser_tab_switch",
+        "description": "Switch to a different tab by its tab ID. Makes the specified tab the active tab. Use browser_tab_list first to get available tab IDs. Requires browser_navigate to be called first.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "tab_id": {
+                    "type": "string",
+                    "description": "The ID of the tab to switch to (obtained from browser_tab_list)"
+                }
+            },
+            "required": ["tab_id"]
+        }
+    },
+    {
+        "name": "browser_tab_close",
+        "description": "Close a specific tab by its tab ID. Cannot close the last remaining tab. After closing, automatically switches to another open tab. Use browser_tab_list first to get available tab IDs. Requires browser_navigate to be called first.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "tab_id": {
+                    "type": "string",
+                    "description": "The ID of the tab to close (obtained from browser_tab_list)"
+                }
+            },
+            "required": ["tab_id"]
+        }
+    },
 ]
 
 
@@ -2812,6 +2864,124 @@ def _camofox_eval(expression: str, task_id: Optional[str] = None) -> str:
         return tool_error(error_msg, success=False)
 
 
+# ---------------------------------------------------------------------------
+# [LOCAL MOD] Browser tab lifecycle management.
+# NOTE (rederive 2026.5.16): the original fork patch routed camofox mode to
+# tools.browser_camofox.camofox_tab_{list,new,switch,close}, but those
+# functions never existed in browser_camofox.py (the source commit only
+# touched browser_tool.py) — so under camofox mode the original would
+# ImportError. We guard the passthrough: if the camofox helper is missing,
+# fall through to the standard _run_browser_command path (which the camofox
+# server may or may not honor) rather than crashing the tool.
+# ---------------------------------------------------------------------------
+def _maybe_camofox_tab(fn_name: str, *args):
+    """Return (handled, result) — handled=True if a camofox helper exists."""
+    if not _is_camofox_mode():
+        return False, None
+    try:
+        import tools.browser_camofox as _cf
+        _fn = getattr(_cf, fn_name, None)
+        if _fn is None:
+            return False, None
+        return True, _fn(*args)
+    except ImportError:
+        return False, None
+
+
+def browser_tab_list(task_id: Optional[str] = None) -> str:
+    """List all open tabs (IDs, titles, URLs, active flag)."""
+    _handled, _r = _maybe_camofox_tab("camofox_tab_list", task_id)
+    if _handled:
+        return _r
+
+    effective_task_id = task_id or "default"
+    result = _run_browser_command(effective_task_id, "tab", ["list"])
+
+    if result.get("success"):
+        tabs = result.get("data", {}).get("tabs", [])
+        return json.dumps({
+            "success": True,
+            "tabs": tabs,
+            "count": len(tabs)
+        }, ensure_ascii=False)
+    else:
+        return json.dumps({
+            "success": False,
+            "error": result.get("error", "Failed to list tabs")
+        }, ensure_ascii=False)
+
+
+def browser_tab_new(url: str = None, task_id: Optional[str] = None) -> str:
+    """Open a new tab (optionally navigate to url); becomes active."""
+    _handled, _r = _maybe_camofox_tab("camofox_tab_new", url, task_id)
+    if _handled:
+        return _r
+
+    effective_task_id = task_id or "default"
+    args = ["new"]
+    if url:
+        args.extend(["--url", url])
+
+    result = _run_browser_command(effective_task_id, "tab", args)
+
+    if result.get("success"):
+        tab_id = result.get("data", {}).get("tabId")
+        return json.dumps({
+            "success": True,
+            "tab_id": tab_id,
+            "url": url or "about:blank"
+        }, ensure_ascii=False)
+    else:
+        return json.dumps({
+            "success": False,
+            "error": result.get("error", "Failed to create new tab")
+        }, ensure_ascii=False)
+
+
+def browser_tab_switch(tab_id: str, task_id: Optional[str] = None) -> str:
+    """Switch to a tab by ID (use browser_tab_list to enumerate)."""
+    _handled, _r = _maybe_camofox_tab("camofox_tab_switch", tab_id, task_id)
+    if _handled:
+        return _r
+
+    effective_task_id = task_id or "default"
+    result = _run_browser_command(effective_task_id, "tab", ["switch", "--tabId", str(tab_id)])
+
+    if result.get("success"):
+        return json.dumps({
+            "success": True,
+            "tab_id": tab_id,
+            "message": f"Switched to tab {tab_id}"
+        }, ensure_ascii=False)
+    else:
+        return json.dumps({
+            "success": False,
+            "error": result.get("error", f"Failed to switch to tab {tab_id}")
+        }, ensure_ascii=False)
+
+
+def browser_tab_close(tab_id: str, task_id: Optional[str] = None) -> str:
+    """Close a tab by ID (cannot close the last remaining tab)."""
+    _handled, _r = _maybe_camofox_tab("camofox_tab_close", tab_id, task_id)
+    if _handled:
+        return _r
+
+    effective_task_id = task_id or "default"
+    result = _run_browser_command(effective_task_id, "tab", ["close", "--tabId", str(tab_id)])
+
+    if result.get("success"):
+        return json.dumps({
+            "success": True,
+            "tab_id": tab_id,
+            "message": f"Closed tab {tab_id}"
+        }, ensure_ascii=False)
+    else:
+        return json.dumps({
+            "success": False,
+            "error": result.get("error", f"Failed to close tab {tab_id}")
+        }, ensure_ascii=False)
+
+
 def _maybe_start_recording(task_id: str):
     """Start recording if browser.record_sessions is enabled in config."""
     with _cleanup_lock:
@@ -3672,4 +3842,37 @@ registry.register(
     handler=lambda args, **kw: browser_console(clear=args.get("clear", False), expression=args.get("expression"), task_id=kw.get("task_id")),
     check_fn=check_browser_requirements,
     emoji="🖥️",
+)
+# [LOCAL MOD] Tab lifecycle management tools.
+registry.register(
+    name="browser_tab_list",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_tab_list"],
+    handler=lambda args, **kw: browser_tab_list(task_id=kw.get("task_id")),
+    check_fn=check_browser_requirements,
+    emoji="📑",
+)
+registry.register(
+    name="browser_tab_new",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_tab_new"],
+    handler=lambda args, **kw: browser_tab_new(url=args.get("url"), task_id=kw.get("task_id")),
+    check_fn=check_browser_requirements,
+    emoji="➕",
+)
+registry.register(
+    name="browser_tab_switch",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_tab_switch"],
+    handler=lambda args, **kw: browser_tab_switch(tab_id=args.get("tab_id", ""), task_id=kw.get("task_id")),
+    check_fn=check_browser_requirements,
+    emoji="🔀",
+)
+registry.register(
+    name="browser_tab_close",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_tab_close"],
+    handler=lambda args, **kw: browser_tab_close(tab_id=args.get("tab_id", ""), task_id=kw.get("task_id")),
+    check_fn=check_browser_requirements,
+    emoji="❌",
 )
