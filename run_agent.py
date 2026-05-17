@@ -2016,6 +2016,17 @@ class AIAgent:
             _agent_cfg = _load_agent_config()
         except Exception:
             _agent_cfg = {}
+        # [LOCAL] Toggles for fork-only patches. All default True for
+        # backward-compat with existing deployments. Override in config.yaml:
+        #   local_patches:
+        #     patch_d_force_rearm: false   # Compression force-rearm at 1.2x threshold
+        #     patch_e_continuation_escalation: false
+        #     patch_f_inloop_compression: false
+        #     patch_g_narrate_detector: false
+        #     patch_j_truncate_oversized_read: false
+        # When LCM (hermes-lcm) is the active context engine, D and F never
+        # execute regardless of these flags (legacy compressor path is dead).
+        self._local_patches = _agent_cfg.get("local_patches") or {}
         try:
             self._tool_guardrails = ToolCallGuardrailController(
                 ToolCallGuardrailConfig.from_mapping(
@@ -2404,6 +2415,7 @@ class AIAgent:
                 config_context_length=_config_context_length,
                 provider=self.provider,
                 api_mode=self.api_mode,
+                local_patches=self._local_patches,
             )
         self.compression_enabled = compression_enabled
 
@@ -15762,7 +15774,8 @@ class AIAgent:
                     # user's intent is probably "the agent really meant
                     # this as the answer", so accept it.
                     if (
-                        self.valid_tool_names
+                        self._local_patches.get("patch_g_narrate_detector", True)
+                        and self.valid_tool_names
                         and not getattr(assistant_message, "tool_calls", None)
                         and finish_reason == "stop"
                         and narrate_no_action_retries < 2
