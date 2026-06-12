@@ -1658,6 +1658,42 @@ class AIAgent:
             self, user_message, assistant_content, messages, require_workspace
         )
 
+    # [LOCAL PATCH G — 2026-05-03] Narrate-without-action detector
+    _NARRATE_TAIL_PATTERNS = (
+        re.compile(r":[\s)\]\*_]*$"),                                # ends with ":"
+        re.compile(r"\blet me\b", re.IGNORECASE),                    # "Let me X"
+        re.compile(r"\bnow i(?:'ll| will)\b", re.IGNORECASE),        # "Now I'll X"
+        re.compile(r"\bnext i(?:'ll| will)\b", re.IGNORECASE),
+        re.compile(r"\bfirst i(?:'ll| will| need|'m going)\b", re.IGNORECASE),
+        re.compile(r"\bi(?:'ll| will) (check|search|find|run|create|read|"
+                   r"write|update|fix|try|look|grab|pull|push|use)\b",
+                   re.IGNORECASE),
+        re.compile(r"\bi'?m going to\b", re.IGNORECASE),
+        re.compile(r"\bgive me a (?:sec|moment|second)\b", re.IGNORECASE),
+        re.compile(r"\bone (?:sec|moment|second)\b", re.IGNORECASE),
+    )
+
+    def _looks_like_narrate_without_action(self, content: str) -> bool:
+        """Detect "narrate-without-action": model emitted intent text but no tool_call.
+
+        qwen3.x-style thinking models often produce trailing-colon narration
+        ("Let me check the config:") without emitting the tool_call, ending the
+        turn so the user must nudge ("ok do it"). We retry with a stronger
+        prompt instead. 1800-char ceiling (bumped from 800 on 2026-05-08 after a
+        real 910-char miss) so long completed answers aren't misdetected. See the
+        hermes_compression_failure_modes memory.
+        """
+        if not content:
+            return False
+        text = self._strip_think_blocks(content).strip()
+        if not text:
+            return False
+        if len(text) > 1800:
+            return False
+        tail = text[-150:]
+        return any(p.search(tail) for p in self._NARRATE_TAIL_PATTERNS)
+    # [/LOCAL PATCH G]
+
     def _extract_reasoning(self, assistant_message) -> Optional[str]:
         """Forwarder — see ``agent.agent_runtime_helpers.extract_reasoning``."""
         from agent.agent_runtime_helpers import extract_reasoning

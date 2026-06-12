@@ -1032,6 +1032,7 @@ def run_conversation(
     interrupted = False
     failed = False
     codex_ack_continuations = 0
+    narrate_no_action_retries = 0  # [LOCAL PATCH G] narrate-without-action nudge retries
     length_continue_retries = 0
     truncated_tool_call_retries = 0
     truncated_response_parts: List[str] = []
@@ -6333,6 +6334,50 @@ def run_conversation(
                     continue
 
                 codex_ack_continuations = 0
+
+                # [LOCAL PATCH G — 2026-05-03] Narrate-without-action detector.
+                # qwen3.x-style thinking models emit "Let me X:" / "I'll Y" then
+                # stop, forgetting the tool_call; the turn ends and the user has to
+                # nudge. When tools + budget remain, force one retry with a strong
+                # nudge before accepting this as final. Limit 2/turn.
+                if (
+                    agent.valid_tool_names
+                    and not getattr(assistant_message, "tool_calls", None)
+                    and finish_reason == "stop"
+                    and narrate_no_action_retries < 2
+                    and agent._looks_like_narrate_without_action(final_response)
+                ):
+                    narrate_no_action_retries += 1
+                    logger.info(
+                        "[LOCAL PATCH G] narrate-without-action detected "
+                        "(%d/2), nudging. tail=%r",
+                        narrate_no_action_retries,
+                        (final_response or "")[-120:],
+                    )
+                    agent._emit_status(
+                        f"↻ Narration without tool_call — nudging "
+                        f"({narrate_no_action_retries}/2)"
+                    )
+                    interim_msg = agent._build_assistant_message(
+                        assistant_message, "incomplete",
+                    )
+                    messages.append(interim_msg)
+                    agent._emit_interim_assistant_message(interim_msg)
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "[System: Your previous response said you would "
+                            "take an action (e.g. \"Let me X\", \"I'll Y\") "
+                            "but did not include any tool_call. Either emit "
+                            "the tool_call right now to actually do what you "
+                            "said, or finish your response with a concrete "
+                            "answer or question — don't leave a sentence "
+                            "trailing with no follow-through.]"
+                        ),
+                    })
+                    agent._session_messages = messages
+                    agent._save_session_log(messages)
+                    continue
 
                 if truncated_response_parts:
                     final_response = "".join(truncated_response_parts) + final_response
