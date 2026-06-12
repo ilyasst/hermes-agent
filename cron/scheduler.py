@@ -3477,18 +3477,29 @@ def run_job(
         #
         # Uses the agent's built-in activity tracker (updated by
         # _touch_activity() on every tool call, API call, and stream delta).
+        # [LOCAL MOD] Precedence: per-job "timeout" field > HERMES_CRON_TIMEOUT
+        # env var > 10-minute default. 0 = unlimited.
         _raw_cron_timeout = os.getenv("HERMES_CRON_TIMEOUT", "").strip()
         if _raw_cron_timeout:
             try:
-                _cron_timeout = float(_raw_cron_timeout)
+                _default_cron_timeout = float(_raw_cron_timeout)
             except (ValueError, TypeError):
                 logger.warning(
                     "Invalid HERMES_CRON_TIMEOUT=%r; using default 600s",
                     _raw_cron_timeout,
                 )
-                _cron_timeout = 600.0
+                _default_cron_timeout = 600.0
         else:
-            _cron_timeout = 600.0
+            _default_cron_timeout = 600.0
+        # [LOCAL MOD] Per-job override via the job's "timeout" field.
+        try:
+            _cron_timeout = float(job.get("timeout", _default_cron_timeout))
+        except (ValueError, TypeError):
+            logger.warning(
+                "Invalid per-job timeout=%r; falling back to %ss",
+                job.get("timeout"), _default_cron_timeout,
+            )
+            _cron_timeout = _default_cron_timeout
         _cron_inactivity_limit = _cron_timeout if _cron_timeout > 0 else None
         _POLL_INTERVAL = 5.0
         # Keep the one-shot run_claim fresh while the run is alive (#62002):

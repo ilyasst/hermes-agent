@@ -4651,6 +4651,12 @@ class TelegramAdapter(BasePlatformAdapter):
                 _TimedOut = None  # type: ignore[assignment,misc]
 
             for i, chunk in enumerate(chunks):
+                # [LOCAL MOD] Proactive delay between chunks to avoid Telegram
+                # flood control (multi-chunk replies trigger escalating RetryAfter
+                # 9s->23s->39s). Reactive RetryAfter handling is a fallback, not a
+                # substitute for proactive spacing. See 2026-04-04 session.
+                if i > 0:
+                    await asyncio.sleep(1.5)
                 retried_thread_not_found = False
                 metadata_reply_to = self._metadata_reply_to_message_id(metadata)
                 private_dm_topic_send = self._is_private_dm_topic_send(chat_id, thread_id, metadata)
