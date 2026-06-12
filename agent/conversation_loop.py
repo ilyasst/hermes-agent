@@ -1887,6 +1887,25 @@ def run_conversation(
                     _xh["x-initiator"] = "user"
                     api_kwargs["extra_headers"] = _xh
                     agent._is_user_initiated_turn = False
+                # [LOCAL] Patch I 2026-05-12 (re-derived onto upstream loop): belt-and-
+                # suspenders against chat-template user-prefix leaks. Local Qwen3.5 via
+                # llama-server --jinja occasionally generates the next user-turn header
+                # ("\nuser\n[<user_name>] ...") past the assistant stop boundary, and the
+                # gateway sends it verbatim. Explicit stop sequences cut generation at the
+                # marker; gateway/run.py strips the same patterns post-hoc as a net.
+                # Disable via HERMES_DISABLE_USER_PREFIX_STOP=1.
+                if (
+                    agent.api_mode == "chat_completions"
+                    and os.environ.get("HERMES_DISABLE_USER_PREFIX_STOP", "0") not in ("1", "true", "yes")
+                ):
+                    _user_prefix_stops = ["\nuser\n[", "\n\nuser\n"]
+                    _existing_stop = api_kwargs.get("stop")
+                    if _existing_stop is None:
+                        api_kwargs["stop"] = _user_prefix_stops
+                    elif isinstance(_existing_stop, str):
+                        api_kwargs["stop"] = [_existing_stop] + _user_prefix_stops
+                    elif isinstance(_existing_stop, list):
+                        api_kwargs["stop"] = list(_existing_stop) + _user_prefix_stops
                 try:
                     from hermes_cli.middleware import apply_llm_request_middleware
 
