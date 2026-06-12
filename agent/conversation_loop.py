@@ -6345,7 +6345,13 @@ def run_conversation(
                     and not getattr(assistant_message, "tool_calls", None)
                     and finish_reason == "stop"
                     and narrate_no_action_retries < 2
-                    and agent._looks_like_narrate_without_action(final_response)
+                    # [LOCAL PATCH K] widened: also routes bare reasoning-only
+                    # JSON ({"thought": ...}) into the nudge, not just narrate tails.
+                    and agent._should_suppress_predelivery_turn(
+                        final_response,
+                        has_tool_calls=bool(getattr(assistant_message, "tool_calls", None)),
+                        finish_reason=finish_reason,
+                    )
                 ):
                     narrate_no_action_retries += 1
                     logger.info(

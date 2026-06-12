@@ -1694,6 +1694,83 @@ class AIAgent:
         return any(p.search(tail) for p in self._NARRATE_TAIL_PATTERNS)
     # [/LOCAL PATCH G]
 
+    # [LOCAL PATCH K — 2026-05-17] Pre-delivery narrate/bare-thought guard.
+    # Real incident: a bare {"thought": "..."} JSON turn (no tool_calls, no
+    # reasoning_content) was DELIVERED verbatim to the user. Patch G's tail
+    # detector misses bare-JSON (ends in `"}`). This adds a narrow
+    # bare-reasoning-JSON classifier and routes such turns into Patch-G's nudge
+    # gate; a delivery-boundary net (bare-JSON only) is the backstop.
+    _PATCH_K_REASONING_KEYS = frozenset({
+        "thought", "thoughts", "reasoning", "plan", "scratchpad", "analysis",
+    })
+    # Keys whose presence means the object DOES carry a user answer → never suppress.
+    _PATCH_K_ANSWER_KEYS = frozenset({
+        "answer", "response", "reply", "message", "text", "output",
+        "final", "final_answer", "result", "content",
+    })
+
+    def _looks_like_bare_reasoning_json(self, content: str) -> bool:
+        """True only when the whole stripped content is a single JSON object
+        whose only/lead key is a reasoning key and which carries NO answer key.
+        Narrow by design: prose isn't JSON (json.loads raises -> False);
+        {"answer": ...} has an answer key -> delivered; {"thought": "..."}
+        (the exact leaked shape) -> suppressed."""
+        if not content:
+            return False
+        text = self._strip_think_blocks(content).strip()
+        if not text:
+            return False
+        if not (text.startswith("{") and text.endswith("}")):
+            return False
+        try:
+            obj = json.loads(text)
+        except (ValueError, TypeError):
+            return False
+        if not isinstance(obj, dict) or not obj:
+            return False
+        keys_lower = [str(k).strip().lower() for k in obj.keys()]
+        if any(k in self._PATCH_K_ANSWER_KEYS for k in keys_lower):
+            return False
+        if not all(k in self._PATCH_K_REASONING_KEYS for k in keys_lower):
+            return False
+        return keys_lower[0] in self._PATCH_K_REASONING_KEYS
+
+    def _patch_k_enabled(self) -> bool:
+        """Config gate + env kill-switch. Reads ``_local_patches`` defensively:
+        that shared plumbing came from Patch D (dropped in the 2026-06 upstream
+        merge), so absent it Patch K is ON by default and controlled by the env
+        kill-switch; the config gate auto-activates if _local_patches is wired."""
+        if os.environ.get("HERMES_DISABLE_PREDELIVERY_NARRATE_GUARD"):
+            return False
+        _lp = getattr(self, "_local_patches", None) or {}
+        return bool(_lp.get("patch_k_suppress_predelivery_narrate", True))
+
+    def _should_suppress_predelivery_turn(
+        self, content: str, has_tool_calls: bool, finish_reason: str,
+        bare_json_only: bool = False,
+    ) -> bool:
+        """Patch K predicate: keep this assistant turn from the user? Suppress iff
+        enabled AND no tool_calls AND finish_reason=='stop' AND it's EITHER a bare
+        reasoning-only JSON object OR (in-loop only) the Patch-G narrate pattern."""
+        if not self._patch_k_enabled():
+            return False
+        if has_tool_calls:
+            return False
+        if finish_reason != "stop":
+            return False
+        if not content or not content.strip():
+            return False
+        if self._looks_like_bare_reasoning_json(content):
+            return True
+        # [LOCAL PATCH K scope 2026-05-17] narrate-without-action is suppressed
+        # only IN-LOOP (routes into Patch-G's nudge); at the delivery boundary the
+        # gateway passes bare_json_only=True so a legit short answer ending in
+        # 'Let me…/colon' is never replaced by a fallback.
+        if not bare_json_only and self._looks_like_narrate_without_action(content):
+            return True
+        return False
+    # [/LOCAL PATCH K]
+
     def _extract_reasoning(self, assistant_message) -> Optional[str]:
         """Forwarder — see ``agent.agent_runtime_helpers.extract_reasoning``."""
         from agent.agent_runtime_helpers import extract_reasoning
