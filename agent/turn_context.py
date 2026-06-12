@@ -1134,7 +1134,27 @@ def build_turn_context(
     ext_prefetch_cache = ""
     if agent._memory_manager:
         try:
-            _query = original_user_message if isinstance(original_user_message, str) else ""
+            # [LOCAL PATCH A — 2026-04-29] Anchor prefetch query on conversation tail.
+            # When a turn fails (API timeout/crash) and the user replies tersely
+            # ("Continue"), using just that reply as the ByteRover query pulls
+            # unrelated memories. Build the query from the last ~2 message contents
+            # (+ user_message) so the search has real anchor text; fall back to
+            # legacy behaviour when no tail content exists.
+            _user = original_user_message if isinstance(original_user_message, str) else ""
+            _tail_parts: list[str] = []
+            _msgs_for_tail = messages if isinstance(messages, list) else []
+            for _m in reversed(_msgs_for_tail[-6:]):  # scan up to 6 recent
+                _c = _m.get("content") if isinstance(_m, dict) else None
+                if isinstance(_c, str) and _c.strip():
+                    _tail_parts.append(_c.strip()[:500])
+                    if len(_tail_parts) >= 2:
+                        break
+            _query_parts = list(reversed(_tail_parts))
+            if _user:
+                _query_parts.append(_user)
+            _query = " | ".join(_query_parts)[:5000]
+            if not _query.strip():
+                _query = _user  # fallback to legacy behaviour
             ext_prefetch_cache = agent._memory_manager.prefetch_all(_query) or ""
         except Exception:
             pass
