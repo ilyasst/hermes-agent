@@ -185,3 +185,7 @@ infographics/
 infograficos/
 infografico/
 native/fts5_cjk/*.so
+# [LOCAL fork] backups + byterover cache
+*.bak
+*.bak-*
+.brv/
