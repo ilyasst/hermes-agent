@@ -58,6 +58,30 @@ def _get_max_read_chars() -> int:
     _max_read_chars_cached = _DEFAULT_MAX_READ_CHARS
     return _max_read_chars_cached
 
+
+_truncate_oversized_read_cached = None
+
+
+def _truncate_oversized_read_enabled() -> bool:
+    """[LOCAL Patch J] When a read exceeds the char limit, return the truncated
+    head plus a concrete continuation directive instead of a hard error. A weak
+    local model can act on "here is the head, call again with offset=N" but often
+    cannot recover from a bare error, looping on the identical failing call.
+    Default True; disable via config.yaml local_patches.patch_j_truncate_oversized_read."""
+    global _truncate_oversized_read_cached
+    if _truncate_oversized_read_cached is not None:
+        return _truncate_oversized_read_cached
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        lp = cfg.get("local_patches") or {}
+        _truncate_oversized_read_cached = bool(lp.get("patch_j_truncate_oversized_read", True))
+        return _truncate_oversized_read_cached
+    except Exception:
+        pass
+    _truncate_oversized_read_cached = True
+    return _truncate_oversized_read_cached
+
 # If the total file size exceeds this AND the caller didn't specify a narrow
 # range (limit <= 200), we include a hint encouraging targeted reads.
 _LARGE_FILE_HINT_BYTES = 512_000  # 512 KB
@@ -859,13 +883,40 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
         max_chars = _get_max_read_chars()
         if content_len > max_chars:
             total_lines = result_dict.get("total_lines", "unknown")
+            if not _truncate_oversized_read_enabled():
+                return json.dumps({
+                    "error": (
+                        f"Read produced {content_len:,} characters which exceeds "
+                        f"the safety limit ({max_chars:,} chars). "
+                        "Use offset and limit to read a smaller range. "
+                        f"The file has {total_lines} lines total."
+                    ),
+                    "path": path,
+                    "total_lines": total_lines,
+                    "file_size": file_size,
+                }, ensure_ascii=False)
+            # [LOCAL Patch J] Truncate-and-continue: hand back the head trimmed to
+            # a line boundary plus a concrete next call. SUCCESS shape (no "error"
+            # key) so it is not classified as a tool failure, and each continuation
+            # differs — identical-call loops cannot form.
+            head = (result.content or "")[:max_chars]
+            nl = head.rfind("\n")
+            if nl > 0:
+                head = head[:nl]
+            lines_shown = head.count("\n") + 1
+            next_offset = (offset or 0) + lines_shown
+            head = redact_sensitive_text(head, code_file=True)
             return json.dumps({
-                "error": (
-                    f"Read produced {content_len:,} characters which exceeds "
-                    f"the safety limit ({max_chars:,} chars). "
-                    "Use offset and limit to read a smaller range. "
-                    f"The file has {total_lines} lines total."
+                "content": head,
+                "truncated": True,
+                "continuation": (
+                    f"[TRUNCATED] Showing the first {len(head):,} chars "
+                    f"(~{lines_shown} lines) of a {content_len:,}-char read; "
+                    f"file has {total_lines} lines total. To read the next "
+                    f"part, call read_file again with offset={next_offset} and "
+                    f"an explicit limit. Do NOT repeat this exact call unchanged."
                 ),
+                "next_offset": next_offset,
                 "path": path,
                 "total_lines": total_lines,
                 "file_size": file_size,
