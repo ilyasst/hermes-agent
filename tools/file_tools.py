@@ -1234,6 +1234,24 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
         # file hasn't been modified since, return a lightweight stub
         # instead of re-sending the same content.  Saves context tokens.
         resolved_str = str(_resolved)
+        # ── [LOCAL Patch J] Auto-advance over-limit re-reads ──────────────
+        # The local model often re-issues a default/top read of a large file
+        # it already received a TRUNCATED head for, because it cannot build the
+        # offset the continuation directive asks for. When that happens, serve
+        # the next unseen window instead so the result differs — this gives
+        # real progress AND dodges the idempotent-no-progress guardrail that
+        # otherwise blocks the identical-result loop. Only fires on a
+        # default/top read (offset <= 1); an explicit forward seek is honoured
+        # verbatim.
+        if _truncate_oversized_read_enabled() and offset <= 1:
+            with _read_tracker_lock:
+                _advance_to = (
+                    _read_tracker.get(task_id, {})
+                    .get("patchj_cursor", {})
+                    .get(resolved_str)
+                )
+            if _advance_to and _advance_to > offset:
+                offset = _advance_to
         dedup_key = (resolved_str, offset, limit)
         with _read_tracker_lock:
             task_data = _read_tracker.setdefault(task_id, {
@@ -1335,6 +1353,17 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
                     "offset."
                 )
             content_len = len(trimmed)
+            # [LOCAL Patch J] Record where the next unseen window starts so a
+            # repeated default/top read auto-advances instead of looping (the
+            # reader block above consults this). Upstream supplies the truncation
+            # and next_offset; only this cursor is local. Bounded: drop the whole
+            # per-task map if it grows large.
+            if _truncate_oversized_read_enabled():
+                with _read_tracker_lock:
+                    _cursor = task_data.setdefault("patchj_cursor", {})
+                    if len(_cursor) > 64:
+                        _cursor.clear()
+                    _cursor[resolved_str] = next_offset
 
         # ── Redact secrets (after guard check to skip oversized content) ──
         if result.content:
@@ -1365,6 +1394,11 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
             # reset its hit counter.  (File either changed or stat failed
             # earlier and we fell through.)
             task_data["dedup_hits"].pop(dedup_key, None)
+            # [LOCAL Patch J] A complete (non-truncated) read fully served this
+            # window — clear any auto-advance cursor so a later top-read of the
+            # same path restarts cleanly instead of skipping ahead.
+            if "patchj_cursor" in task_data:
+                task_data["patchj_cursor"].pop(resolved_str, None)
             task_data["read_history"].add((path, offset, limit))
             if task_data["last_key"] == read_key:
                 task_data["consecutive"] += 1
