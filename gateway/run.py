@@ -1012,8 +1012,8 @@ def _build_replay_entry(
 
 
 _TELEGRAM_OBSERVED_CONTEXT_PROMPT_MARKER = "observed Telegram group context"
-_OBSERVED_GROUP_CONTEXT_HEADER = "[Observed Telegram group context - context only, not requests]"
-_CURRENT_ADDRESSED_MESSAGE_HEADER = "[Current addressed message - answer only this unless it explicitly asks you to use the observed context]"
+_OBSERVED_GROUP_CONTEXT_HEADER = "[Recent messages from this group that you observed - use them as context when they help answer]"  # [LOCAL] softened: weak local model ignored the upstream "context only, not requests" phrasing
+_CURRENT_ADDRESSED_MESSAGE_HEADER = "[The message addressed to you - answer it, drawing on the recent group messages above whenever they are relevant]"  # [LOCAL] softened from "answer only this unless..." which suppressed observed-context use on Qwen3.5
 
 
 def _uses_telegram_observed_group_context(channel_prompt: Optional[str]) -> bool:
