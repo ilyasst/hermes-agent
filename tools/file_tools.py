@@ -128,6 +128,29 @@ def _truncate_to_char_budget(content: str, max_chars: int) -> tuple[str, int, bo
     return "\n".join(kept), len(kept), True
 
 
+_truncate_oversized_read_cached = None
+
+
+def _truncate_oversized_read_enabled() -> bool:
+    """[LOCAL Patch J] When a read exceeds the char limit, return the truncated
+    head plus a concrete continuation directive instead of a hard error. A weak
+    local model can act on "here is the head, call again with offset=N" but often
+    cannot recover from a bare error, looping on the identical failing call.
+    Default True; disable via config.yaml local_patches.patch_j_truncate_oversized_read."""
+    global _truncate_oversized_read_cached
+    if _truncate_oversized_read_cached is not None:
+        return _truncate_oversized_read_cached
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        lp = cfg.get("local_patches") or {}
+        _truncate_oversized_read_cached = bool(lp.get("patch_j_truncate_oversized_read", True))
+        return _truncate_oversized_read_cached
+    except Exception:
+        pass
+    _truncate_oversized_read_cached = True
+    return _truncate_oversized_read_cached
+
 # If the total file size exceeds this AND the caller didn't specify a narrow
 # range (limit <= 200), we include a hint encouraging targeted reads.
 _LARGE_FILE_HINT_BYTES = 512_000  # 512 KB
