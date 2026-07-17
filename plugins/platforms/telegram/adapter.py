@@ -6468,6 +6468,25 @@ class TelegramAdapter(BasePlatformAdapter):
         if not query or not query.data:
             return
         data = query.data
+        # [LOCAL] gw-card interception -> route task/state card taps
+        # (delivered by nalyze-cards-sender) to the standalone gw handler.
+        # Handled here because this gateway owns the @nalyze_bobot
+        # long-poll; a second poller would 409-conflict. See
+        # tools/gw_card_handler.py.
+        if data.split("|", 1)[0] in (
+                "tc", "tcr", "tcx", "tcp", "tcb", "mtk", "treo",
+                "gst", "gsu"):
+            try:
+                await query.answer()
+            except Exception:
+                pass
+            try:
+                from tools.gw_card_handler import handle_gw_card_callback
+                await handle_gw_card_callback(query, data, self.name)
+            except Exception as exc:
+                logger.error("[%s] gw-card callback failed: %s",
+                             self.name, exc)
+            return
         query_message = getattr(query, "message", None)
         query_chat_id = getattr(query_message, "chat_id", None)
         query_chat = getattr(query_message, "chat", None)
