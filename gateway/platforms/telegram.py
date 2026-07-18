@@ -5659,6 +5659,18 @@ class TelegramAdapter(BasePlatformAdapter):
         msg = self._effective_update_message(update)
         if not msg or not msg.text:
             return
+        # [LOCAL] gw-card command interception -> push N oldest task cards
+        # (before _should_process_message so it works without @-mention;
+        # auth enforced in the handler via GW_CARD_ALLOWED_USERS).
+        try:
+            from tools.gw_card_handler import (
+                is_gw_card_command, handle_gw_card_command)
+            if is_gw_card_command(msg.text):
+                await handle_gw_card_command(msg, msg.text, self.name)
+                return
+        except Exception as exc:
+            logger.error("[%s] gw-card command hook error: %s",
+                         self.name, exc)
         if not self._should_process_message(msg, is_command=True):
             return
         await self._ensure_forum_commands(msg)
