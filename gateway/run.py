@@ -22377,7 +22377,29 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         "(before=%d chars, after=%d chars)",
                         len(final_response), len(_stripped),
                     )
-                    final_response = _stripped or None
+                    if _stripped:
+                        final_response = _stripped
+                    else:
+                        # [LOCAL PATCH I refinement] The ENTIRE reply was a
+                        # leaked transcript header with no real answer (local
+                        # Qwen3.5 quirk on long tool-heavy turns). Blanking it
+                        # to None here falls through to the generic 'no response
+                        # was generated / transient error' fallback, which is
+                        # misleading: the turn did not error, the model just
+                        # garbled its final message. Substitute an honest,
+                        # non-alarming re-send prompt instead.
+                        logger.warning(
+                            "[LOCAL PATCH I] final_response was ONLY a leaked "
+                            "user-turn header (%d chars); substituting re-send "
+                            "prompt instead of empty fallback",
+                            len(final_response),
+                        )
+                        final_response = (
+                            "⚠️ The local model garbled its reply that time "
+                            "(it echoed the chat format instead of answering). "
+                            "Nothing broke, please re-send or rephrase your "
+                            "last message."
+                        )
 
             # [LOCAL] Patch K 2026-05-17: defensive pre-delivery net for
             # bare-reasoning-JSON turns. The primary fix routes such turns into
