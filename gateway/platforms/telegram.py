@@ -345,22 +345,61 @@ def _wrap_markdown_tables(text: str) -> str:
 _GW_CARD_MODULE = "tools.gw_card_handler"
 
 
-def _gw_card_hooks(adapter_name):
-    """(is_gw_card, handle_gw_card_callback), or (None, None) to fail open."""
+def _gw_card_module(adapter_name):
+    """The optional gw-card module, or None to fail open.
+
+    ONE loader for both the callback and the command path. The command hook
+    used to carry its own broad `except Exception: logger.error(...)`, which
+    could not tell "this host does not run cards" from "the handler is
+    installed and broken" - so on a host where absence is the steady state it
+    logged an error for every slash command the user sent. Two hand-maintained
+    copies of a rule is also how the prefix list drifted in the first place.
+    """
     try:
-        from tools.gw_card_handler import (  # noqa: PLC0415
-            handle_gw_card_callback, is_gw_card)
+        import tools.gw_card_handler as mod  # noqa: PLC0415
     except ModuleNotFoundError as exc:
         if getattr(exc, "name", None) == _GW_CARD_MODULE:
-            return None, None          # not installed here - expected, quiet
+            return None                # not installed here - expected, quiet
         logger.error("[%s] gw-card handler is installed but its imports "
                      "fail: %s", adapter_name, exc)
-        return None, None
+        return None
     except Exception as exc:
         logger.error("[%s] gw-card handler failed to import: %s",
                      adapter_name, exc)
+        return None
+    return mod
+
+
+def _gw_card_entrypoints(adapter_name, predicate, handler):
+    """(predicate, handler) attributes off the module, or (None, None).
+
+    A module that loads but lacks the pair IS news: it means a stale or
+    partial handler is deployed, which the old `from ... import` form
+    surfaced as an ImportError and an attribute lookup would otherwise defer
+    to the call site as an AttributeError.
+    """
+    mod = _gw_card_module(adapter_name)
+    if mod is None:
         return None, None
-    return is_gw_card, handle_gw_card_callback
+    fn_p, fn_h = getattr(mod, predicate, None), getattr(mod, handler, None)
+    if not callable(fn_p) or not callable(fn_h):
+        logger.error("[%s] gw-card handler is missing %s/%s - deployed "
+                     "module is stale or partial", adapter_name, predicate,
+                     handler)
+        return None, None
+    return fn_p, fn_h
+
+
+def _gw_card_hooks(adapter_name):
+    """(is_gw_card, handle_gw_card_callback), or (None, None) to fail open."""
+    return _gw_card_entrypoints(adapter_name, "is_gw_card",
+                                "handle_gw_card_callback")
+
+
+def _gw_card_command_hooks(adapter_name):
+    """(is_gw_card_command, handle_gw_card_command), or (None, None)."""
+    return _gw_card_entrypoints(adapter_name, "is_gw_card_command",
+                                "handle_gw_card_command")
 
 
 class TelegramAdapter(BasePlatformAdapter):
@@ -5700,15 +5739,32 @@ class TelegramAdapter(BasePlatformAdapter):
         # [LOCAL] gw-card command interception -> push N oldest task cards
         # (before _should_process_message so it works without @-mention;
         # auth enforced in the handler via GW_CARD_ALLOWED_USERS).
-        try:
-            from tools.gw_card_handler import (
-                is_gw_card_command, handle_gw_card_command)
-            if is_gw_card_command(msg.text):
-                await handle_gw_card_command(msg, msg.text, self.name)
-                return
-        except Exception as exc:
-            logger.error("[%s] gw-card command hook error: %s",
-                         self.name, exc)
+        #
+        # Absence of the module is the steady state on a host that does not
+        # run cards and is SILENT - see _gw_card_module. The previous broad
+        # except logged an error for EVERY slash command on such a host, which
+        # is the noise the callback loader exists to avoid.
+        _gw_is_cmd, _gw_handle_cmd = _gw_card_command_hooks(self.name)
+        if _gw_is_cmd is not None:
+            try:
+                _gw_claims = _gw_is_cmd(msg.text)
+            except Exception as exc:
+                logger.error("[%s] gw-card command predicate failed: %s",
+                             self.name, exc)
+                _gw_claims = False
+            if _gw_claims:
+                try:
+                    await _gw_handle_cmd(msg, msg.text, self.name)
+                except Exception as exc:
+                    # Behaviour PRESERVED from before this patch: a claimed
+                    # command that fails still falls through to native
+                    # handling. The callback path deliberately does NOT (it
+                    # returns unacknowledged). Whether the two should agree is
+                    # a real question, deferred rather than decided here.
+                    logger.error("[%s] gw-card command failed: %s",
+                                 self.name, exc)
+                else:
+                    return
         if not self._should_process_message(msg, is_command=True):
             return
         await self._ensure_forum_commands(msg)
