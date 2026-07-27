@@ -108,6 +108,75 @@ def _handler(is_card, on_call=None, calls=None):
     return m
 
 
+def _boom_predicate(_text):
+    raise RuntimeError("predicate exploded")
+
+
+def _broken_module():
+    """Installed, but its own lazily-imported dependency is missing."""
+    m = types.ModuleType("tools.gw_card_handler")
+
+    def _raise(_name):
+        raise ModuleNotFoundError("No module named 'gw'", name="gw")
+    m.__getattr__ = _raise
+    return m
+
+
+def _cmd_handler(is_cmd, explode=False):
+    """A handler module exposing the COMMAND pair (and the callback pair, so
+    the module is a realistic complete handler rather than a partial one)."""
+    m = types.ModuleType("tools.gw_card_handler")
+    m.is_gw_card = lambda d: False
+    m._calls = []
+
+    async def handle_cb(query, data, name):
+        pass
+
+    async def handle_cmd(msg, text, name):
+        m._calls.append((text, name))
+        if explode:
+            raise RuntimeError("bridge down")
+
+    m.handle_gw_card_callback = handle_cb
+    m.is_gw_card_command = is_cmd
+    m.handle_gw_card_command = handle_cmd
+    return m
+
+
+class _Message:
+    def __init__(self, text):
+        self.text = text
+        self.message_thread_id = None
+        self.chat = _Sentinel()
+
+
+class _CmdUpdate:
+    def __init__(self, msg):
+        self._msg = msg
+        self.update_id = 1
+        self.message = msg
+        self.effective_message = msg
+
+
+def _run_command(text):
+    """Drive the REAL _handle_command; return whether the native chain was
+    reached. The gw-card block runs BEFORE _should_process_message, so that
+    call is the first thing past the block — patching it is how 'reached
+    native' is observed without building a whole adapter."""
+    adapter = _Adapter.__new__(_Adapter)
+    reached = []
+
+    def _gate(msg, is_command=False):
+        reached.append(True)
+        return False            # stop there; nothing beyond it is under test
+
+    adapter._should_process_message = _gate
+    adapter._effective_update_message = lambda update: update.message
+    msg = _Message(text)
+    asyncio.run(adapter._handle_command(_CmdUpdate(msg), None))
+    return bool(reached)
+
+
 class _CaptureLog(logging.Handler):
     def __init__(self):
         super().__init__()
@@ -224,17 +293,60 @@ def main():
        "and does NOT fall through: once claimed the tap is ours, and a "
        "native handler does not own this prefix")
 
-    # ── 6. the command hook is untouched ──
     src = Path(T.__file__).read_text(encoding="utf-8")
-    ok("is_gw_card_command, handle_gw_card_command" in src,
-       "the command hook still imports its own predicate and handler")
-    ok(src.count("_should_process_message(msg, is_command=True)") == 1,
-       "and still falls through to native command handling")
     ok('"tc", "tcr", "tcx"' not in src and '"gst", "gsu")' not in src,
        "no hardcoded prefix tuple remains anywhere in the file")
 
+    # ── 6. THE COMMAND BOUNDARY (gw#51) ──
+    # This section replaced three source-text checks asserting "the command
+    # hook is untouched". gw#51 touches it deliberately, so that guard is
+    # superseded — and one of those checks had started passing off a docstring
+    # rather than off the code it meant to pin, which is its own lesson.
+    #
+    # The command path used a broad except with an unconditional logger.error,
+    # so on a host where the module is absent — the steady state gw#36 makes
+    # permanent — every slash command logged an error. Observed live: one
+    # command, one "gw-card command hook error". These six drive the REAL
+    # _handle_command.
+    for label, module, text, expect_native, expect_log, expect_delegations in [
+        ("absent -> SILENT native fallthrough",
+         None, "/oldest", True, None, 0),
+        ("installed but broken -> LOGGED native fallthrough",
+         "broken", "/oldest", True, "installed but its imports fail", 0),
+        ("predicate FALSE -> quiet native path",
+         _cmd_handler(lambda t: False), "/weather", True, None, 0),
+        ("predicate RAISES -> logged, native path",
+         _cmd_handler(_boom_predicate), "/oldest", True,
+         "gw-card command predicate failed", 0),
+        ("claimed and handled -> exactly one delegation, no native path",
+         _cmd_handler(lambda t: True), "/oldest", False, None, 1),
+        # one delegation ON PURPOSE: the handler ran and then failed. The
+        # property is that the failure is not handed back, not that the
+        # handler was never called.
+        ("claimed then RAISES -> logged, and NOT handed to native",
+         _cmd_handler(lambda t: True, explode=True), "/oldest", False,
+         "gw-card command failed", 1),
+    ]:
+        clear()
+        calls = []
+        mod = _broken_module() if module == "broken" else module
+        if mod is not None:
+            mod._calls = calls
+        _install(mod)
+        reached = _run_command(text)
+        ok(reached is expect_native,
+           f"command {label}: native chain "
+           f"{'reached' if expect_native else 'NOT reached'}")
+        if expect_log:
+            ok(expect_log in logs(), f"command {label}: reported")
+        else:
+            ok(logs() == "", f"command {label}: nothing logged")
+        ok(len(calls) == expect_delegations,
+           f"command {label}: {expect_delegations} delegation(s)")
+
     print(f"\nALL {N} CHECKS PASSED — gateway boundary: claim from the "
-          "artifact, delegate before acknowledging, quiet only for absence")
+          "artifact, delegate before acknowledging, quiet only for absence, "
+          "and a claimed command is never handed back")
 
 
 if __name__ == "__main__":

@@ -56,30 +56,44 @@ def handle_gw_card_callback(*a): pass
 BROKEN = "import a_module_that_does_not_exist_xyz\n"
 
 
-def _resolves_tools(finder):
-    """Can this meta-path finder resolve the real ``tools`` package?"""
-    find_spec = getattr(finder, "find_spec", None)
-    if find_spec is None:
-        return False
-    try:
-        return find_spec("tools", None) is not None
-    except Exception:
-        return False
+class _Redirect:
+    """A controlled finder placed at the FRONT of ``sys.meta_path``.
+
+    Two earlier attempts were wrong in instructive ways. Emptying a package
+    ``__path__`` does not work — the real file is on disk in this checkout and
+    gets found anyway. Filtering out every finder that can resolve ``tools``
+    does not work either: depending on how the environment installs this repo,
+    that set includes Python's own ``PathFinder``, and removing it leaves the
+    fixture unable to import its own temporary package. The result passed on
+    one host and failed on another, which is worse than failing everywhere.
+
+    So: own the two names outright and answer for them from ``root``. Nothing
+    else is disturbed.
+    """
+
+    def __init__(self, root):
+        self.root = root
+
+    def find_spec(self, name, path=None, target=None):
+        if name == "tools":
+            init = self.root / "tools" / "__init__.py"
+            return importlib.util.spec_from_file_location(
+                "tools", init,
+                submodule_search_locations=[str(self.root / "tools")])
+        if name == "tools.gw_card_handler":
+            f = self.root / "tools" / "gw_card_handler.py"
+            if not f.exists():
+                raise ModuleNotFoundError(
+                    f"No module named {name!r}", name=name)
+            return importlib.util.spec_from_file_location(name, f)
+        return None
 
 
 @pytest.fixture
-def isolate_tools(monkeypatch):
-    """Make the test's ``tools`` package the only one that can be imported.
-
-    hermes-agent is installed editable, which puts a custom finder on
-    ``sys.meta_path`` resolving ``tools`` to the real checkout. Meta-path
-    finders run BEFORE ``sys.path``, so prepending a directory does not
-    override it — an earlier version of this file did exactly that and the
-    'absent' cases silently imported the live handler instead.
-    """
+def isolate_tools(tmp_path, monkeypatch):
+    """Resolve ``tools`` from the test's directory and nowhere else."""
     monkeypatch.setattr(
-        sys, "meta_path",
-        [f for f in sys.meta_path if not _resolves_tools(f)],
+        sys, "meta_path", [_Redirect(tmp_path)] + list(sys.meta_path),
         raising=False)
 
 
@@ -164,8 +178,8 @@ class TestUnusableIsLoud:
         msgs = [r.getMessage() for r in _errors(caplog)]
         assert any("imports fail" in m for m in msgs), msgs
 
-    def test_missing_tools_package_is_reported(self, monkeypatch, caplog,
-                                               isolate_tools):
+    def test_missing_tools_package_is_reported(self, tmp_path, monkeypatch,
+                                               caplog):
         """A missing PACKAGE is not the same as a missing submodule.
 
         The repo ships ``tools/``, so its absence is a real fault and stays
@@ -173,12 +187,13 @@ class TestUnusableIsLoud:
         depends on ``isolate_tools``: without it an editable install resolves
         ``tools`` anyway and the case cannot be constructed at all.
         """
+        # A finder that owns the names but has no package behind them.
+        monkeypatch.setattr(sys, "meta_path",
+                            [_Redirect(tmp_path)] + list(sys.meta_path),
+                            raising=False)
         for name in [n for n in sys.modules
                      if n == "tools" or n.startswith("tools.")]:
             monkeypatch.delitem(sys.modules, name, raising=False)
-        assert importlib.util.find_spec("tools") is None, (
-            "isolate_tools failed: a real tools package is still importable"
-        )
         with caplog.at_level(logging.DEBUG):
             assert _gw_card_hooks("tg") == (None, None)
         assert _errors(caplog) != []

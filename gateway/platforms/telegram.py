@@ -381,7 +381,22 @@ def _gw_card_entrypoints(adapter_name, predicate, handler):
     mod = _gw_card_module(adapter_name)
     if mod is None:
         return None, None
-    fn_p, fn_h = getattr(mod, predicate, None), getattr(mod, handler, None)
+    try:
+        fn_p = getattr(mod, predicate, None)
+        fn_h = getattr(mod, handler, None)
+    except ImportError as exc:
+        # Attribute access can EXECUTE code: a module-level __getattr__
+        # (PEP 562) may import lazily, so a handler whose own dependency is
+        # missing fails HERE rather than at import time. Same condition as an
+        # import-time failure, so it is reported in the same words — moving
+        # WHERE it surfaces must not change WHAT the operator is told.
+        logger.error("[%s] gw-card handler is installed but its imports "
+                     "fail: %s", adapter_name, exc)
+        return None, None
+    except Exception as exc:
+        logger.error("[%s] gw-card handler failed while resolving %s/%s: %s",
+                     adapter_name, predicate, handler, exc)
+        return None, None
     if not callable(fn_p) or not callable(fn_h):
         logger.error("[%s] gw-card handler is missing %s/%s - deployed "
                      "module is stale or partial", adapter_name, predicate,
@@ -5756,15 +5771,15 @@ class TelegramAdapter(BasePlatformAdapter):
                 try:
                     await _gw_handle_cmd(msg, msg.text, self.name)
                 except Exception as exc:
-                    # Behaviour PRESERVED from before this patch: a claimed
-                    # command that fails still falls through to native
-                    # handling. The callback path deliberately does NOT (it
-                    # returns unacknowledged). Whether the two should agree is
-                    # a real question, deferred rather than decided here.
+                    # Claimed, then failed: ours to fail, and NOT handed back.
+                    # Returning a claimed command to the native chain makes a
+                    # second claimant act after a visible gw failure, which can
+                    # perform a different action than the one the user asked
+                    # for. Matches the callback path, which returns rather than
+                    # falling through for the same reason.
                     logger.error("[%s] gw-card command failed: %s",
                                  self.name, exc)
-                else:
-                    return
+                return
         if not self._should_process_message(msg, is_command=True):
             return
         await self._ensure_forum_commands(msg)
