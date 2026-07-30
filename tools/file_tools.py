@@ -1397,7 +1397,11 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
             # [LOCAL Patch J] A complete (non-truncated) read fully served this
             # window — clear any auto-advance cursor so a later top-read of the
             # same path restarts cleanly instead of skipping ahead.
-            if "patchj_cursor" in task_data:
+            # NOTE: upstream's truncation path now falls through to here instead
+            # of returning early (it did return early on the pre-2026-07 base),
+            # so this must skip truncated reads or it erases the cursor that was
+            # just recorded above, in the same call.
+            if "patchj_cursor" in task_data and not result_dict.get("truncated"):
                 task_data["patchj_cursor"].pop(resolved_str, None)
             task_data["read_history"].add((path, offset, limit))
             if task_data["last_key"] == read_key:
