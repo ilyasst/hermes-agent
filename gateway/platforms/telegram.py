@@ -333,6 +333,90 @@ def _wrap_markdown_tables(text: str) -> str:
     return '\n'.join(out)
 
 
+# [LOCAL] gw-card optional-capability loader.
+#
+# ABSENCE of the optional module is the normal steady state on a host that
+# does not run cards, and must be SILENT - logging it would emit a line per
+# native callback and train everyone to ignore the one that matters.
+#
+# Everything else is news: a module that IS installed but broken, or one
+# whose own imports fail, is a real fault. Suppressing ModuleNotFoundError
+# broadly would hide exactly that, so the exact module name is checked.
+_GW_CARD_MODULE = "tools.gw_card_handler"
+
+
+def _gw_card_module(adapter_name):
+    """The optional gw-card module, or None to fail open.
+
+    ONE loader for both the callback and the command path. The command hook
+    used to carry its own broad `except Exception: logger.error(...)`, which
+    could not tell "this host does not run cards" from "the handler is
+    installed and broken" - so on a host where absence is the steady state it
+    logged an error for every slash command the user sent. Two hand-maintained
+    copies of a rule is also how the prefix list drifted in the first place.
+    """
+    try:
+        import tools.gw_card_handler as mod  # noqa: PLC0415
+    except ModuleNotFoundError as exc:
+        if getattr(exc, "name", None) == _GW_CARD_MODULE:
+            return None                # not installed here - expected, quiet
+        logger.error("[%s] gw-card handler is installed but its imports "
+                     "fail: %s", adapter_name, exc)
+        return None
+    except Exception as exc:
+        logger.error("[%s] gw-card handler failed to import: %s",
+                     adapter_name, exc)
+        return None
+    return mod
+
+
+def _gw_card_entrypoints(adapter_name, predicate, handler):
+    """(predicate, handler) attributes off the module, or (None, None).
+
+    A module that loads but lacks the pair IS news: it means a stale or
+    partial handler is deployed, which the old `from ... import` form
+    surfaced as an ImportError and an attribute lookup would otherwise defer
+    to the call site as an AttributeError.
+    """
+    mod = _gw_card_module(adapter_name)
+    if mod is None:
+        return None, None
+    try:
+        fn_p = getattr(mod, predicate, None)
+        fn_h = getattr(mod, handler, None)
+    except ImportError as exc:
+        # Attribute access can EXECUTE code: a module-level __getattr__
+        # (PEP 562) may import lazily, so a handler whose own dependency is
+        # missing fails HERE rather than at import time. Same condition as an
+        # import-time failure, so it is reported in the same words — moving
+        # WHERE it surfaces must not change WHAT the operator is told.
+        logger.error("[%s] gw-card handler is installed but its imports "
+                     "fail: %s", adapter_name, exc)
+        return None, None
+    except Exception as exc:
+        logger.error("[%s] gw-card handler failed while resolving %s/%s: %s",
+                     adapter_name, predicate, handler, exc)
+        return None, None
+    if not callable(fn_p) or not callable(fn_h):
+        logger.error("[%s] gw-card handler is missing %s/%s - deployed "
+                     "module is stale or partial", adapter_name, predicate,
+                     handler)
+        return None, None
+    return fn_p, fn_h
+
+
+def _gw_card_hooks(adapter_name):
+    """(is_gw_card, handle_gw_card_callback), or (None, None) to fail open."""
+    return _gw_card_entrypoints(adapter_name, "is_gw_card",
+                                "handle_gw_card_callback")
+
+
+def _gw_card_command_hooks(adapter_name):
+    """(is_gw_card_command, handle_gw_card_command), or (None, None)."""
+    return _gw_card_entrypoints(adapter_name, "is_gw_card_command",
+                                "handle_gw_card_command")
+
+
 class TelegramAdapter(BasePlatformAdapter):
     """
     Telegram bot adapter.
@@ -3644,25 +3728,33 @@ class TelegramAdapter(BasePlatformAdapter):
         if not query or not query.data:
             return
         data = query.data
-        # [LOCAL] gw-card interception -> route task/state card taps
-        # (delivered by nalyze-cards-sender) to the standalone gw handler.
-        # Handled here because this gateway owns the @nalyze_bobot
-        # long-poll; a second poller would 409-conflict. See
-        # tools/gw_card_handler.py.
-        if data.split("|", 1)[0] in (
-                "tc", "tcr", "tcx", "tcp", "tcb", "mtk", "treo",
-                "gst", "gsu"):
+        # [LOCAL] gw-card interception. Ownership comes from the GENERATED
+        # artifact (the gw.cards handled subset) - no prefix list is kept
+        # here, because a hand-maintained one drifts and has.
+        #
+        # Delegation happens BEFORE any acknowledgement. A missing or failing
+        # handler must leave the callback to the native chain rather than ack
+        # it and drop it, and gw.cards is the sole acknowledger for taps it
+        # claims. See tools/gw_card_handler.py.
+        _gw_is_card, _gw_handle = _gw_card_hooks(self.name)
+        if _gw_is_card is not None:
             try:
-                await query.answer()
-            except Exception:
-                pass
-            try:
-                from tools.gw_card_handler import handle_gw_card_callback
-                await handle_gw_card_callback(query, data, self.name)
+                _gw_claimed = _gw_is_card(data)
             except Exception as exc:
-                logger.error("[%s] gw-card callback failed: %s",
+                logger.error("[%s] gw-card predicate failed: %s",
                              self.name, exc)
-            return
+                _gw_claimed = False
+            if _gw_claimed:
+                try:
+                    await _gw_handle(query, data, self.name)
+                except Exception as exc:
+                    # Claimed, then failed: ours to fail. Leave the tap
+                    # UNACKNOWLEDGED so it is visibly stuck rather than
+                    # silently swallowed, and do NOT fall through to a
+                    # native handler that does not own this prefix.
+                    logger.error("[%s] gw-card callback failed: %s",
+                                 self.name, exc)
+                return
         query_message = getattr(query, "message", None)
         query_chat_id = getattr(query_message, "chat_id", None)
         query_chat = getattr(query_message, "chat", None)
@@ -5662,15 +5754,32 @@ class TelegramAdapter(BasePlatformAdapter):
         # [LOCAL] gw-card command interception -> push N oldest task cards
         # (before _should_process_message so it works without @-mention;
         # auth enforced in the handler via GW_CARD_ALLOWED_USERS).
-        try:
-            from tools.gw_card_handler import (
-                is_gw_card_command, handle_gw_card_command)
-            if is_gw_card_command(msg.text):
-                await handle_gw_card_command(msg, msg.text, self.name)
+        #
+        # Absence of the module is the steady state on a host that does not
+        # run cards and is SILENT - see _gw_card_module. The previous broad
+        # except logged an error for EVERY slash command on such a host, which
+        # is the noise the callback loader exists to avoid.
+        _gw_is_cmd, _gw_handle_cmd = _gw_card_command_hooks(self.name)
+        if _gw_is_cmd is not None:
+            try:
+                _gw_claims = _gw_is_cmd(msg.text)
+            except Exception as exc:
+                logger.error("[%s] gw-card command predicate failed: %s",
+                             self.name, exc)
+                _gw_claims = False
+            if _gw_claims:
+                try:
+                    await _gw_handle_cmd(msg, msg.text, self.name)
+                except Exception as exc:
+                    # Claimed, then failed: ours to fail, and NOT handed back.
+                    # Returning a claimed command to the native chain makes a
+                    # second claimant act after a visible gw failure, which can
+                    # perform a different action than the one the user asked
+                    # for. Matches the callback path, which returns rather than
+                    # falling through for the same reason.
+                    logger.error("[%s] gw-card command failed: %s",
+                                 self.name, exc)
                 return
-        except Exception as exc:
-            logger.error("[%s] gw-card command hook error: %s",
-                         self.name, exc)
         if not self._should_process_message(msg, is_command=True):
             return
         await self._ensure_forum_commands(msg)
