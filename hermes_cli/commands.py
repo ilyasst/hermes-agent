@@ -525,6 +525,54 @@ def _iter_plugin_command_entries() -> list[tuple[str, str, str]]:
     return entries
 
 
+def _gw_card_menu_entries() -> list[tuple[str, str]]:
+    """[(command, description)] for forwarded gw-card commands, or [].
+
+    Source of truth is the generated artifact the forwarding gate already
+    reads, so the menu cannot disagree with what is actually forwarded.
+
+    Returns [] — never raises — when cards are not installed on this host,
+    when the artifact predates the menu field, or when it cannot be read.
+    A host without cards is the steady state, not an error.
+    """
+    import glob
+    import json
+    import os
+
+    override = os.environ.get("GW_CARDS_PREFIXES_ARTIFACT")
+    paths = [override] if override else sorted(glob.glob(
+        os.path.expanduser("~/.config/gw/*-cards-prefixes.json")))
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for path in paths:
+        if not path:
+            continue
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        menu = data.get("command_menu")
+        if isinstance(menu, list):
+            for entry in menu:
+                if not isinstance(entry, dict):
+                    continue
+                name = str(entry.get("command") or "").lstrip("/").strip()
+                if name and name not in seen:
+                    seen.add(name)
+                    out.append((name, str(entry.get("description") or
+                                           "GW task cards")))
+        else:
+            # Artifact predating `command_menu`: still advertise the names it
+            # forwards, without a description we do not have.
+            for cmd in (data.get("commands") or []):
+                name = str(cmd).lstrip("/").strip()
+                if name and name not in seen:
+                    seen.add(name)
+                    out.append((name, "GW task cards"))
+    return out
+
+
 def telegram_bot_commands() -> list[tuple[str, str]]:
     """Return (command_name, description) pairs for Telegram setMyCommands.
 
@@ -947,6 +995,37 @@ def telegram_menu_commands(max_commands: int = 100) -> tuple[list[tuple[str, str
                 all_commands.append((_tg, _desc))
                 reserved_names.add(_tg)
     except Exception:
+        pass
+
+    # [LOCAL MOD] Surface FORWARDED gw-card commands in the Telegram menu.
+    #
+    # The gateway forwards these to an external one-shot (see the gw-card
+    # hooks in gateway/platforms/telegram.py), but the menu is built only from
+    # this repo's registry — so a forwarded command works when typed and never
+    # appears when you type `/`. Observed live: three forwarded commands, none
+    # of them in the menu.
+    #
+    # Read from the SAME generated artifact the forwarding gate reads, not
+    # from a list kept here. Forwarding and advertising then come from one
+    # file, so a command cannot become forwarded-but-unadvertised again — the
+    # exact state this fixes.
+    #
+    # Placed BEFORE the skill entries deliberately. The menu is over its cap
+    # and already hides dozens, but a hidden native command is still reachable
+    # through /commands, which enumerates this repo's registry. A hidden
+    # FORWARDED command appears in no listing at all, because it is not in
+    # that registry. It is therefore strictly less discoverable than anything
+    # it displaces.
+    try:
+        for _name, _desc in _gw_card_menu_entries():
+            _tg = _sanitize_telegram_name(_name)
+            if not _tg or _tg in reserved_names:
+                continue
+            all_commands.append((_tg, str(_desc)[:40]))
+            reserved_names.add(_tg)
+    except Exception:
+        # Absence of the artifact is the steady state on a host that does not
+        # run cards, and is SILENT — same contract as the forwarding hooks.
         pass
 
     remaining_slots = max(0, max_commands - len(all_commands))
