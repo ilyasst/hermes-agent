@@ -262,6 +262,7 @@ sys.path.insert(0, str(_Path(__file__).resolve().parents[3]))
 
 from gateway.authz_mixin import _coerce_allow_set
 from gateway.config import Platform, PlatformConfig
+from gateway.gw_cards import handler as gw_cards_handler
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -6192,6 +6193,18 @@ class TelegramAdapter(BasePlatformAdapter):
         if not query or not query.data:
             return
         data = query.data
+
+        # A generated Cards handler claims only the prefixes it can serve.
+        # Missing or incomplete generated code is a pass-through, so the
+        # regular gateway never loses a callback to a stale installation.
+        cards = gw_cards_handler()
+        if cards is not None and cards.is_gw_card(data):
+            try:
+                await cards.handle_gw_card_callback(query, data, self.name)
+            except Exception:
+                logger.exception("[%s] GW Cards callback failed", self.name)
+            return
+
         query_message = getattr(query, "message", None)
         query_chat_id = getattr(query_message, "chat_id", None)
         query_chat = getattr(query_message, "chat", None)
@@ -8641,6 +8654,16 @@ class TelegramAdapter(BasePlatformAdapter):
         """Handle incoming command messages."""
         msg = self._effective_update_message(update)
         if not msg or not msg.text:
+            return
+        # Generated Cards commands are handled before the normal mention gate.
+        # The handler enforces its own Cards authorization; after it claims a
+        # command, falling through would run it a second time as an agent prompt.
+        cards = gw_cards_handler()
+        if cards is not None and cards.is_gw_card_command(msg.text):
+            try:
+                await cards.handle_gw_card_command(msg, msg.text, self.name)
+            except Exception:
+                logger.exception("[%s] GW Cards command failed", self.name)
             return
         if not self._should_process_message(msg, is_command=True):
             return
