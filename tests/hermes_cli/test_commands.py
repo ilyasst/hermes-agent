@@ -1233,35 +1233,43 @@ class TestTelegramMenuCommands:
                 f"Command '{name}' is {len(name)} chars (limit {_TG_NAME_LIMIT})"
             )
 
-    def test_gw_cards_menu_entry_requires_the_dispatch_handler(self, monkeypatch):
-        import sys
-        from types import ModuleType
+    def test_gw_cards_menu_entry_requires_the_dispatch_handler(
+            self, monkeypatch, tmp_path):
+        """A menu entry appears only for a handler this checkout can load.
 
-        handler = ModuleType("tools.gw_card_handler")
-        handler.GW_CARD_COMMANDS = ("/gwtasks",)
-        handler.is_gw_card = lambda _data: False
-        handler.is_gw_card_command = lambda _text: False
+        Uses the explicit handler-path seam, not a module injected into
+        sys.modules. The loader deliberately refuses a preloaded foreign
+        module — that is the cross-checkout failure it exists to prevent — so
+        injecting one models the defect rather than a deployed handler, and
+        can no longer exercise the public contract.
+        """
+        from gateway import gw_cards
 
-        async def callback(*_args):
-            return None
+        handler = tmp_path / "gw_card_handler.py"
+        handler.write_text(
+            "\n".join([
+                "GW_CARD_COMMANDS = ('/gwtasks',)",
+                "GW_CARD_PREFIXES = ('tc',)",
+                "def is_gw_card(_data): return False",
+                "def is_gw_card_command(_text): return False",
+                "async def handle_gw_card_callback(*_args): return None",
+                "async def handle_gw_card_command(*_args): return None",
+                "def _artifact():",
+                "    return {'command_menu': ["
+                "{'command': 'gwtasks', 'description': 'Task backlog'}]}",
+            ]) + "\n",
+            encoding="utf-8")
 
-        async def command(*_args):
-            return None
-
-        handler.handle_gw_card_callback = callback
-        handler.handle_gw_card_command = command
-        handler._artifact = lambda: {
-            "command_menu": [{"command": "gwtasks", "description": "Task backlog"}]
-        }
-        monkeypatch.setitem(sys.modules, "tools.gw_card_handler", handler)
+        monkeypatch.setenv(gw_cards.HANDLER_PATH_ENV, str(handler))
         cap = len(telegram_bot_commands()) + 1
         menu, _ = telegram_menu_commands(max_commands=cap)
         assert ("gwtasks", "Task backlog") in menu
 
-        monkeypatch.delitem(sys.modules, "tools.gw_card_handler")
-        menu, _ = telegram_menu_commands(max_commands=100)
-        assert "gwtasks" not in {name for name, _description in menu}
-
+        # And absent when the configured path does not resolve.
+        monkeypatch.setenv(gw_cards.HANDLER_PATH_ENV,
+                           str(tmp_path / "missing.py"))
+        menu, _ = telegram_menu_commands(max_commands=cap)
+        assert not any(name == "gwtasks" for name, _ in menu)
     def test_operational_builtins_survive_thirty_command_cap(self, tmp_path, monkeypatch):
         (tmp_path / "config.yaml").write_text(
             "display:\n  tool_progress_command: true\n"
