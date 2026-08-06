@@ -8,20 +8,51 @@ advertising.
 """
 from __future__ import annotations
 
-import importlib
+import importlib.util
 import logging
+import os
+from pathlib import Path
 from types import ModuleType
 
 
 logger = logging.getLogger(__name__)
 
 
+# A module-name import is not an installation boundary: another checkout (or a
+# prior import) can supply ``tools.gw_card_handler`` through sys.path.  The
+# generated handler belongs to THIS Hermes checkout unless an operator has
+# explicitly supplied a different file for this process.
+HANDLER_PATH_ENV = "HERMES_GW_CARDS_HANDLER_PATH"
+
+
+def _handler_path() -> Path | None:
+    override = os.environ.get(HANDLER_PATH_ENV)
+    if override:
+        path = Path(override).expanduser()
+        if not path.is_absolute():
+            logger.error("GW Cards handler override must be an absolute path")
+            return None
+        return path
+    return Path(__file__).resolve().parents[1] / "tools" / "gw_card_handler.py"
+
+
 def handler() -> ModuleType | None:
     """Return a complete generated handler, or ``None`` without side effects."""
-    try:
-        mod = importlib.import_module("tools.gw_card_handler")
-    except ModuleNotFoundError:
+    path = _handler_path()
+    if path is None or not path.is_file():
         return None
+    try:
+        # Do not import by the handler's public-looking package name.  The
+        # private name and explicit spec make the selected file, rather than
+        # sys.path or sys.modules, the authority for a Cards installation.
+        spec = importlib.util.spec_from_file_location(
+            "_hermes_gw_cards_handler", path
+        )
+        if spec is None or spec.loader is None:
+            logger.error("GW Cards handler has no loadable module spec")
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
     except Exception:
         logger.exception("GW Cards handler could not be imported; leaving update untouched")
         return None
