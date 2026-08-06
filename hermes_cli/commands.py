@@ -525,6 +525,21 @@ def _iter_plugin_command_entries() -> list[tuple[str, str, str]]:
     return entries
 
 
+def _gw_card_menu_entries() -> list[tuple[str, str]]:
+    """Forwarded GW Cards commands the installed gateway can dispatch.
+
+    The optional bridge is the gate, rather than a glob of artifacts. An
+    artifact can belong to another persona or outlive its handler; a command
+    is shown only when this checkout has the generated handler that owns it.
+    """
+    try:
+        from gateway.gw_cards import command_menu_entries
+
+        return command_menu_entries()
+    except Exception:
+        return []
+
+
 def telegram_bot_commands() -> list[tuple[str, str]]:
     """Return (command_name, description) pairs for Telegram setMyCommands.
 
@@ -929,6 +944,16 @@ def telegram_menu_commands(max_commands: int = 100) -> tuple[list[tuple[str, str
     reserved_names = {n for n, _ in core_commands}
     all_commands = list(core_commands)
     hidden_core_count = max(0, len(all_commands) - max_commands)
+
+    # An optional generated GW Cards handler owns these commands. They precede
+    # skills because a hidden native command is still listed by /commands,
+    # whereas a forwarded command has no other discovery surface.
+    for name, description in _gw_card_menu_entries():
+        tg_name = _sanitize_telegram_name(name)
+        if not tg_name or tg_name in reserved_names:
+            continue
+        all_commands.append((tg_name, str(description)[:40]))
+        reserved_names.add(tg_name)
 
     remaining_slots = max(0, max_commands - len(all_commands))
     entries, hidden_count = _collect_gateway_skill_entries(

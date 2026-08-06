@@ -1233,6 +1233,43 @@ class TestTelegramMenuCommands:
                 f"Command '{name}' is {len(name)} chars (limit {_TG_NAME_LIMIT})"
             )
 
+    def test_gw_cards_menu_entry_requires_the_dispatch_handler(
+            self, monkeypatch, tmp_path):
+        """A menu entry appears only for a handler this checkout can load.
+
+        Uses the explicit handler-path seam, not a module injected into
+        sys.modules. The loader deliberately refuses a preloaded foreign
+        module — that is the cross-checkout failure it exists to prevent — so
+        injecting one models the defect rather than a deployed handler, and
+        can no longer exercise the public contract.
+        """
+        from gateway import gw_cards
+
+        handler = tmp_path / "gw_card_handler.py"
+        handler.write_text(
+            "\n".join([
+                "GW_CARD_COMMANDS = ('/gwtasks',)",
+                "GW_CARD_PREFIXES = ('tc',)",
+                "def is_gw_card(_data): return False",
+                "def is_gw_card_command(_text): return False",
+                "async def handle_gw_card_callback(*_args): return None",
+                "async def handle_gw_card_command(*_args): return None",
+                "def _artifact():",
+                "    return {'command_menu': ["
+                "{'command': 'gwtasks', 'description': 'Task backlog'}]}",
+            ]) + "\n",
+            encoding="utf-8")
+
+        monkeypatch.setenv(gw_cards.HANDLER_PATH_ENV, str(handler))
+        cap = len(telegram_bot_commands()) + 1
+        menu, _ = telegram_menu_commands(max_commands=cap)
+        assert ("gwtasks", "Task backlog") in menu
+
+        # And absent when the configured path does not resolve.
+        monkeypatch.setenv(gw_cards.HANDLER_PATH_ENV,
+                           str(tmp_path / "missing.py"))
+        menu, _ = telegram_menu_commands(max_commands=cap)
+        assert not any(name == "gwtasks" for name, _ in menu)
     def test_operational_builtins_survive_thirty_command_cap(self, tmp_path, monkeypatch):
         (tmp_path / "config.yaml").write_text(
             "display:\n  tool_progress_command: true\n"
