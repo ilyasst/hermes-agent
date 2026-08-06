@@ -34,6 +34,21 @@ from agent.prompt_builder import DEFAULT_AGENT_IDENTITY
 # ---------------------------------------------------------------------------
 
 
+def test_user_turn_header_only_classifier_accepts_template_leak():
+    from agent.conversation_loop import _is_user_turn_header_only
+
+    assert _is_user_turn_header_only("user\n[sender] Continue") is True
+
+
+def test_user_turn_header_only_classifier_rejects_answer_with_suffix():
+    from agent.conversation_loop import _is_user_turn_header_only
+
+    assert (
+        _is_user_turn_header_only("Completed answer\nuser\n[sender] Continue")
+        is False
+    )
+
+
 def _make_tool_defs(*names: str) -> list:
     """Build minimal tool definition list accepted by AIAgent.__init__."""
     return [
@@ -100,6 +115,37 @@ def test_run_conversation_dict_returns_include_final_response():
 @pytest.fixture()
 def agent():
     """Minimal AIAgent with mocked OpenAI client and tool loading."""
+    with (
+        patch(
+            "run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search")
+        ),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        a = AIAgent(
+            api_key="test-key-1234567890",
+            base_url="https://openrouter.ai/api/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        a.client = MagicMock()
+        return a
+
+
+@pytest.fixture()
+def isolated_agent(monkeypatch):
+    """Minimal agent whose import-time log path follows test isolation.
+
+    ``run_agent`` resolves its logging home during module import, before the
+    autouse fixture can set the per-test ``HERMES_HOME``.  Most developer
+    homes are writable so that ordering is easy to miss; these response-loop
+    tests use the already-created isolated home explicitly and never touch a
+    live Hermes directory.
+    """
+    from hermes_constants import get_hermes_home
+
+    monkeypatch.setattr(run_agent, "_hermes_home", get_hermes_home())
     with (
         patch(
             "run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search")
@@ -4663,6 +4709,61 @@ class TestRunConversation:
         assert result["completed"] is True
         assert result["final_response"] == "Here is the actual answer."
         assert result["api_calls"] == 2  # 1 original + 1 nudge retry
+
+    def test_header_only_user_turn_leak_retries_after_tools(self, isolated_agent):
+        agent = isolated_agent
+        self._setup_agent(agent)
+        tc = _mock_tool_call(name="web_search", arguments="{}", call_id="c1")
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="", finish_reason="tool_calls", tool_calls=[tc],
+            ),
+            _mock_response(
+                content="user\n[sender] Continue", finish_reason="stop",
+            ),
+            _mock_response(content="Completed answer", finish_reason="stop"),
+        ]
+
+        with (
+            patch("run_agent.handle_function_call", return_value="search result"),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("continue")
+
+        assert result["completed"] is True
+        assert result["final_response"] == "Completed answer"
+        assert result["api_calls"] == 3
+        retry_messages = agent.client.chat.completions.create.call_args_list[2].kwargs[
+            "messages"
+        ]
+        assert retry_messages[-2]["content"] == "(empty)"
+        assert "continue with the task" in retry_messages[-1]["content"]
+        assert all(
+            "user\n[sender]" not in str(message.get("content", ""))
+            for message in retry_messages
+        )
+
+    def test_answer_with_leaked_user_suffix_is_not_retried_in_loop(
+        self, isolated_agent,
+    ):
+        agent = isolated_agent
+        self._setup_agent(agent)
+        content = "Completed answer\nuser\n[sender] Continue"
+        agent.client.chat.completions.create.return_value = _mock_response(
+            content=content, finish_reason="stop",
+        )
+
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("continue")
+
+        assert result["final_response"] == content
+        assert result["api_calls"] == 1
 
     def test_empty_response_triggers_fallback_provider(self, agent):
         """After 3 empty retries, fallback provider is activated and produces content."""

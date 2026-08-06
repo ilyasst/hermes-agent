@@ -255,6 +255,36 @@ def test_chat_gateways_keep_normal_answers(platform):
 
 
 @pytest.mark.parametrize("platform", CHAT_PLATFORMS)
+def test_chat_gateways_strip_leaked_next_user_turn_suffix(platform):
+    """A valid answer must survive while a leaked next-user turn is removed."""
+    raw = "Completed answer.\nuser\n[sender] Continue"
+
+    assert _sanitize_gateway_final_response(platform, raw) == "Completed answer."
+
+
+@pytest.mark.parametrize("platform", CHAT_PLATFORMS)
+def test_chat_gateways_drop_header_only_next_user_turn(platform):
+    """Defense in depth: a header-only leak must never reach chat delivery."""
+    raw = "user\n[sender] Continue"
+
+    assert _sanitize_gateway_final_response(platform, raw) == ""
+
+
+def test_raw_gateway_surface_keeps_next_user_turn_text_for_diagnostics():
+    """Local diagnostics remain byte-for-byte raw by contract."""
+    raw = "Completed answer.\nuser\n[sender] Continue"
+
+    assert _sanitize_gateway_final_response("local", raw) == raw
+
+
+def test_normal_answer_with_user_and_brackets_is_not_truncated():
+    """Only the exact two-line template header at the suffix is special."""
+    answer = "The user [sender] should continue with the documented procedure."
+
+    assert _sanitize_gateway_final_response(Platform.TELEGRAM, answer) == answer
+
+
+@pytest.mark.parametrize("platform", CHAT_PLATFORMS)
 def test_chat_gateways_drop_interrupt_sentinel(platform):
     """The interrupt-while-waiting sentinel is metadata, not a reply (#7921)."""
     sentinel = "Operation interrupted: waiting for model response (1.7s elapsed)."

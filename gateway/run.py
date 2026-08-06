@@ -510,6 +510,10 @@ _GATEWAY_PROVIDER_ERROR_SHAPE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_LEAKED_USER_TURN_SUFFIX_RE = re.compile(
+    r"(?ms)(?:\A|\n)\s*user\s*\n\s*\[[^\]\n]+\][^\n]*(?:\n.*)?\Z"
+)
+
 
 def _looks_like_gateway_provider_error(text: str) -> bool:
     """True when text is infrastructure/provider failure, not normal content.
@@ -555,6 +559,23 @@ def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
         return ""
 
     redacted = _redact_gateway_user_facing_secrets(str(text))
+
+    # Some local chat templates can continue past the assistant boundary and
+    # emit the next user-turn header.  Header-only completions are recovered in
+    # the agent loop; this delivery-boundary guard handles the distinct case
+    # where a valid answer precedes the leaked suffix.  Keep raw diagnostic
+    # surfaces unchanged (the early return above) and anchor the match to the
+    # end so ordinary prose containing the word "user" is not rewritten.
+    stripped = _LEAKED_USER_TURN_SUFFIX_RE.sub("", redacted).rstrip()
+    if stripped != redacted:
+        logger.warning(
+            "Stripped leaked user-turn suffix from gateway response "
+            "(before=%d chars, after=%d chars)",
+            len(redacted),
+            len(stripped),
+        )
+        redacted = stripped
+
     if _looks_like_gateway_provider_error(redacted):
         return _gateway_provider_error_reply(redacted)
     return redacted
