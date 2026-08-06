@@ -2530,6 +2530,58 @@ class TestRunConversation:
         assert result["final_response"] == "Final answer"
         assert result["completed"] is True
 
+    def test_header_only_user_turn_leak_retries_after_tools(self, agent):
+        self._setup_agent(agent)
+        tc = _mock_tool_call(name="web_search", arguments="{}", call_id="c1")
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="", finish_reason="tool_calls", tool_calls=[tc],
+            ),
+            _mock_response(
+                content="user\n[sender] Continue", finish_reason="stop",
+            ),
+            _mock_response(content="Completed answer", finish_reason="stop"),
+        ]
+
+        with (
+            patch("run_agent.handle_function_call", return_value="search result"),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("continue")
+
+        assert result["completed"] is True
+        assert result["final_response"] == "Completed answer"
+        assert result["api_calls"] == 3
+        retry_messages = agent.client.chat.completions.create.call_args_list[2].kwargs[
+            "messages"
+        ]
+        assert retry_messages[-2]["content"] == "(empty)"
+        assert retry_messages[-2]["_empty_recovery_synthetic"] is True
+        assert "continue with the task" in retry_messages[-1]["content"]
+        assert all(
+            "user\n[sender]" not in str(message.get("content", ""))
+            for message in retry_messages
+        )
+
+    def test_answer_with_leaked_user_suffix_is_not_retried_in_loop(self, agent):
+        self._setup_agent(agent)
+        content = "Completed answer\nuser\n[sender] Continue"
+        agent.client.chat.completions.create.return_value = _mock_response(
+            content=content, finish_reason="stop",
+        )
+
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("continue")
+
+        assert result["final_response"] == content
+        assert result["api_calls"] == 1
+
     def test_tool_calls_then_stop(self, agent):
         self._setup_agent(agent)
         tc = _mock_tool_call(name="web_search", arguments="{}", call_id="c1")
