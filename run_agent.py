@@ -3979,6 +3979,19 @@ class AIAgent:
 
 
     # [LOCAL PATCH G — 2026-05-03] Narrate-without-action detector
+    _USER_TURN_HEADER_ONLY_RE = re.compile(
+        r"\A\s*user\s*\n\s*\[[^\]\n]+\][^\n]*(?:\n.*)?\Z",
+        re.DOTALL,
+    )
+
+    @classmethod
+    def _is_user_turn_header_only(cls, content: str) -> bool:
+        """Return whether visible output is only a leaked next-user turn."""
+        return bool(
+            isinstance(content, str)
+            and cls._USER_TURN_HEADER_ONLY_RE.fullmatch(content)
+        )
+
     _NARRATE_TAIL_PATTERNS = (
         re.compile(r":[\s)\]\*_]*$"),                                # ends with ":"
         re.compile(r"\blet me\b", re.IGNORECASE),                    # "Let me X"
@@ -15752,6 +15765,21 @@ class AIAgent:
                 else:
                     # No tool calls - this is the final response
                     final_response = assistant_message.content or ""
+
+                    # Patch I's stop sequences and the gateway delivery guard
+                    # prevent a generated next-user header from reaching the
+                    # platform.  If that header is the *entire* completion,
+                    # classify it as empty here so the existing bounded retry
+                    # path can recover instead of letting the gateway strip it
+                    # to a generic no-response error.  A real answer followed
+                    # by a leaked suffix remains for the delivery guard to trim.
+                    if self._is_user_turn_header_only(final_response):
+                        logger.warning(
+                            "Header-only leaked user turn — treating response "
+                            "as empty for bounded recovery (model=%s)",
+                            self.model,
+                        )
+                        final_response = ""
                     
                     # Fix: unmute output when entering the no-tool-call branch
                     # so the user can see empty-response warnings and recovery
@@ -15770,7 +15798,10 @@ class AIAgent:
                         _partial_streamed = (
                             getattr(self, "_current_streamed_assistant_text", "") or ""
                         )
-                        if self._has_content_after_think_block(_partial_streamed):
+                        if (
+                            self._has_content_after_think_block(_partial_streamed)
+                            and not self._is_user_turn_header_only(_partial_streamed)
+                        ):
                             _turn_exit_reason = "partial_stream_recovery"
                             _recovered = self._strip_think_blocks(_partial_streamed).strip()
                             logger.info(
