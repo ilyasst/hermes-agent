@@ -1,5 +1,8 @@
 """Tests for the central command registry and autocomplete."""
 
+import sys
+from types import ModuleType
+
 from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.document import Document
 
@@ -1129,6 +1132,29 @@ class TestTelegramMenuCommands:
             assert 1 <= len(name) <= _TG_NAME_LIMIT, (
                 f"Command '{name}' is {len(name)} chars (limit {_TG_NAME_LIMIT})"
             )
+
+    def test_gw_menu_intersects_artifact_metadata_with_claimed_commands(
+        self, monkeypatch
+    ):
+        import tools
+
+        handler = ModuleType("tools.gw_card_handler")
+        handler.GW_CARD_COMMANDS = ("/gwtasks", "/oldest", "/gwtasks")
+        handler._artifact = lambda: {
+            "command_menu": [
+                {"command": "gwtasks", "description": "Browse GW tasks"},
+                {"command": "oldest", "description": "Show oldest tasks"},
+                {"command": "not_claimed", "description": "Must stay hidden"},
+            ]
+        }
+        monkeypatch.setitem(sys.modules, "tools.gw_card_handler", handler)
+        monkeypatch.setattr(tools, "gw_card_handler", handler, raising=False)
+
+        menu, _ = telegram_menu_commands(max_commands=100)
+
+        assert menu.count(("gwtasks", "Browse GW tasks")) == 1
+        assert ("oldest", "Show oldest tasks") in menu
+        assert not any(name == "not_claimed" for name, _description in menu)
 
     def test_operational_builtins_survive_thirty_command_cap(self, tmp_path, monkeypatch):
         (tmp_path / "config.yaml").write_text(

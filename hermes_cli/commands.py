@@ -525,6 +525,56 @@ def telegram_bot_commands() -> list[tuple[str, str]]:
     return result
 
 
+def _gw_card_menu_entries() -> list[tuple[str, str]]:
+    """Commands the installed GW Cards handler both declares and describes.
+
+    The generated handler is the dispatch boundary, so the artifact's
+    presentation metadata may describe a command only when the handler also
+    claims it.  Hosts without a current artifact therefore advertise nothing
+    and keep their native command menu unchanged.
+    """
+    try:
+        from tools import gw_card_handler as handler
+    except Exception:
+        return []
+
+    declared = tuple(
+        command.strip().lower().lstrip("/")
+        for command in (getattr(handler, "GW_CARD_COMMANDS", ()) or ())
+        if isinstance(command, str) and command.strip()
+    )
+    if not declared:
+        return []
+
+    try:
+        artifact_reader = getattr(handler, "_artifact", None)
+        artifact = (artifact_reader() if callable(artifact_reader)
+                    else getattr(handler, "_ARTIFACT", {}))
+    except Exception:
+        artifact = {}
+    if not isinstance(artifact, Mapping):
+        artifact = {}
+
+    descriptions: dict[str, str] = {}
+    for entry in artifact.get("command_menu") or ():
+        if not isinstance(entry, Mapping):
+            continue
+        command = str(entry.get("command") or "").strip().lower().lstrip("/")
+        if command:
+            descriptions[command] = str(
+                entry.get("description") or "GW task cards")
+
+    result: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for command in declared:
+        name = command
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        result.append((name, descriptions.get(command, "GW task cards")))
+    return result
+
+
 _TELEGRAM_MENU_PRIORITY = (
     # Most-typed everyday commands first.
     "help",
@@ -806,6 +856,16 @@ def telegram_menu_commands(max_commands: int = 100) -> tuple[list[tuple[str, str
     reserved_names = {n for n, _ in core_commands}
     all_commands = list(core_commands)
     hidden_core_count = max(0, len(all_commands) - max_commands)
+
+    # [LOCAL MOD] GW owns the forwarded command contract. Advertise only the
+    # commands claimed by the installed generated handler, with descriptions
+    # read from the same artifact, so dispatch and discovery cannot drift.
+    for _name, _description in _gw_card_menu_entries():
+        _tg = _sanitize_telegram_name(_name)
+        if not _tg or _tg in reserved_names:
+            continue
+        all_commands.append((_tg, str(_description)[:40]))
+        reserved_names.add(_tg)
 
     # [LOCAL MOD] Surface user-defined quick_commands in the Telegram menu.
     # Upstream intentionally hides them; we want them visible in autocomplete.
