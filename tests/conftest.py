@@ -13,6 +13,11 @@ Hermetic-test invariants enforced here (see AGENTS.md for rationale):
 3. **Deterministic runtime.** TZ=UTC, LANG=C.UTF-8, PYTHONHASHSEED=0.
 4. **No HERMES_SESSION_* inheritance** — the agent's current gateway
    session must not leak into tests.
+5. **File-descriptor headroom.** The soft RLIMIT_NOFILE is raised when it
+   is too low to run this suite. macOS defaults to 256, which this suite
+   exhausts — and the resulting failure is unrecognisable, surfacing as
+   tens of thousands of unrelated collection errors rather than as
+   "you are out of file descriptors".
 
 These invariants make the local test run match CI closely. Gaps that
 remain (CPU count, xdist worker count) are addressed by the canonical
@@ -24,6 +29,81 @@ import os
 import sqlite3
 import sys
 from pathlib import Path
+
+# ─────────────────────────────────────────────────────────────────────────
+# Invariant 5: file-descriptor headroom
+# ─────────────────────────────────────────────────────────────────────────
+# macOS ships a soft RLIMIT_NOFILE of 256. This suite exceeds it, and the
+# way it fails is the problem: descriptor exhaustion surfaces as thousands
+# of unrelated collection errors and assertion failures scattered across
+# the tree, with nothing naming the real cause. A run on this machine
+# produced ~37,500 "errors" that were entirely an artifact of the limit.
+#
+# The hard limit is typically far higher (unlimited on macOS), so the fix
+# is to RAISE the soft limit rather than to complain about it — a guard
+# that only reports leaves every developer to apply the same workaround by
+# hand. We fail only when the ceiling genuinely cannot be lifted, and then
+# we say exactly why.
+_FD_WANTED = 8192
+_FD_MINIMUM = 1024
+
+
+def _ensure_fd_headroom() -> None:
+    try:
+        import resource
+    except ImportError:          # non-POSIX; nothing to raise
+        return
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft >= _FD_MINIMUM:
+        return
+
+    ceiling = _FD_WANTED if hard == resource.RLIM_INFINITY else min(_FD_WANTED, hard)
+    # Descend on failure: macOS also caps per-process descriptors via
+    # kern.maxfilesperproc, which setrlimit will refuse to exceed.
+    target = ceiling
+    while target >= _FD_MINIMUM:
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+            return
+        except (ValueError, OSError):
+            target //= 2
+
+    # Two different dead ends, needing different advice. Prescribing one
+    # command for both is worse than saying nothing: `ulimit -n` cannot raise
+    # a HARD cap, so telling someone to run it in the very shell whose hard
+    # cap is the problem sends them to a command that must fail.
+    if hard != resource.RLIM_INFINITY and hard < _FD_MINIMUM:
+        detail = (
+            f"The HARD limit is {hard}, below the {_FD_MINIMUM} this suite "
+            f"needs, and a process cannot raise its own hard limit.\n"
+            f"Start a new shell or login session with a higher hard "
+            f"descriptor limit — on macOS via `launchctl limit maxfiles` or "
+            f"a launchd plist, on Linux via /etc/security/limits.conf or the "
+            f"unit's LimitNOFILE — then re-run."
+        )
+    else:
+        detail = (
+            f"The hard limit ({hard}) is sufficient, but the soft limit could "
+            f"not be raised above {soft}: the platform refused the request. "
+            f"macOS also caps per-process descriptors via "
+            f"kern.maxfilesperproc, independently of the hard limit.\n"
+            f"Check the session/platform descriptor configuration, or raise "
+            f"the soft limit before invoking pytest:  ulimit -n {_FD_WANTED}"
+        )
+
+    raise RuntimeError(
+        f"This suite needs at least {_FD_MINIMUM} file descriptors; the "
+        f"observed limits are soft={soft}, hard={hard}.\n"
+        f"Without headroom the suite fails as thousands of unrelated "
+        f"collection errors rather than as descriptor exhaustion, so it is "
+        f"refused here instead.\n"
+        f"{detail}"
+    )
+
+
+_ensure_fd_headroom()
+
 
 import pytest
 

@@ -510,6 +510,10 @@ _GATEWAY_PROVIDER_ERROR_SHAPE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_LEAKED_USER_TURN_SUFFIX_RE = re.compile(
+    r"(?ms)(?:\A|\n)\s*user\s*\n\s*\[[^\]\n]+\][^\n]*(?:\n.*)?\Z"
+)
+
 
 def _looks_like_gateway_provider_error(text: str) -> bool:
     """True when text is infrastructure/provider failure, not normal content.
@@ -555,6 +559,23 @@ def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
         return ""
 
     redacted = _redact_gateway_user_facing_secrets(str(text))
+
+    # Some local chat templates can continue past the assistant boundary and
+    # emit the next user-turn header.  Header-only completions are recovered in
+    # the agent loop; this delivery-boundary guard handles the distinct case
+    # where a valid answer precedes the leaked suffix.  Keep raw diagnostic
+    # surfaces unchanged (the early return above) and anchor the match to the
+    # end so ordinary prose containing the word "user" is not rewritten.
+    stripped = _LEAKED_USER_TURN_SUFFIX_RE.sub("", redacted).rstrip()
+    if stripped != redacted:
+        logger.warning(
+            "Stripped leaked user-turn suffix from gateway response "
+            "(before=%d chars, after=%d chars)",
+            len(redacted),
+            len(stripped),
+        )
+        redacted = stripped
+
     if _looks_like_gateway_provider_error(redacted):
         return _gateway_provider_error_reply(redacted)
     return redacted
@@ -12067,11 +12088,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             # has all API keys in os.environ.
                             from tools.environments.local import _sanitize_subprocess_env
                             sanitized_env = _sanitize_subprocess_env(os.environ.copy())
-                            # [LOCAL MOD] Forward user-typed args to exec
-                            # quick_commands via HERMES_QUICK_ARGS so scripts
+                            # [LOCAL MOD: quick-args] Forward user-typed args to
+                            # exec quick_commands via HERMES_QUICK_ARGS so scripts
                             # can accept parameters (e.g. /claude_rc squareone).
                             # Injected AFTER sanitization so it survives the
                             # credential scrub but doesn't reintroduce secrets.
+                            # Dropped twice already by upstream merges; if this
+                            # block goes missing, every /claude_rc* command
+                            # silently targets the "default" session.
                             try:
                                 sanitized_env["HERMES_QUICK_ARGS"] = (
                                     event.get_command_args().strip()
@@ -22360,46 +22384,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # Return final response, or a message if something went wrong
             final_response = result.get("final_response")
 
-            # [LOCAL] Patch I 2026-05-12: strip leaked next-user-turn headers from
-            # the assistant's final response. Local Qwen3.5 via llama-server --jinja
-            # occasionally generates "\nuser\n[<user_name>] ..." past the assistant
-            # stop boundary; without this the platform sees the bot literally echo
-            # "[ilyass] nudge" as its reply. conversation_loop.py adds matching stop
-            # sequences proactively (Patch I); this strip is the safety net.
-            if final_response and isinstance(final_response, str):
-                _leak_re = re.compile(
-                    r"(?ms)(?:\A|\n)\s*user\s*\n\s*\[[^\]\n]+\][^\n]*(?:\n.*)?$"
-                )
-                _stripped = _leak_re.sub("", final_response).rstrip()
-                if _stripped != final_response:
-                    logger.warning(
-                        "Stripped leaked user-turn header from final_response "
-                        "(before=%d chars, after=%d chars)",
-                        len(final_response), len(_stripped),
-                    )
-                    if _stripped:
-                        final_response = _stripped
-                    else:
-                        # [LOCAL PATCH I refinement] The ENTIRE reply was a
-                        # leaked transcript header with no real answer (local
-                        # Qwen3.5 quirk on long tool-heavy turns). Blanking it
-                        # to None here falls through to the generic 'no response
-                        # was generated / transient error' fallback, which is
-                        # misleading: the turn did not error, the model just
-                        # garbled its final message. Substitute an honest,
-                        # non-alarming re-send prompt instead.
-                        logger.warning(
-                            "[LOCAL PATCH I] final_response was ONLY a leaked "
-                            "user-turn header (%d chars); substituting re-send "
-                            "prompt instead of empty fallback",
-                            len(final_response),
-                        )
-                        final_response = (
-                            "⚠️ The local model garbled its reply that time "
-                            "(it echoed the chat format instead of answering). "
-                            "Nothing broke, please re-send or rephrase your "
-                            "last message."
-                        )
+            # Patch I's gateway half was retired here on 2026-08-10: upstream
+            # now owns both cases it covered, and owns them better.
+            #   - Answer followed by a leaked suffix: stripped at the delivery
+            #     boundary by _sanitize_gateway_final_response, whose
+            #     _LEAKED_USER_TURN_SUFFIX_RE is the same regex this block used,
+            #     applied for every platform rather than this one path.
+            #   - Reply that is ONLY a leaked header: agent/conversation_loop.py
+            #     classifies it as empty (_is_user_turn_header_only) so the
+            #     bounded retry path gets the model to answer again, instead of
+            #     this block's apology asking the user to re-send.
+            # Patch I's PROACTIVE half is still local and still required: the
+            # stop sequences in agent/conversation_loop.py. Upstream's comment
+            # ("stop sequences and delivery sanitizers prevent...") assumes they
+            # are there, so do not drop them.
 
             # [LOCAL] Patch K 2026-05-17: defensive pre-delivery net for
             # bare-reasoning-JSON turns. The primary fix routes such turns into
@@ -22974,7 +22972,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             _agent_warning_raw = _float_env("HERMES_AGENT_TIMEOUT_WARNING", 900)
             _agent_warning = _agent_warning_raw if _agent_warning_raw > 0 else None
             _warning_fired = False
-            _executor_start = time.time()  # [LOCAL MOD] idle-clock floor
+            _executor_start = time.time()  # [LOCAL MOD: idle-clock floor]
             _executor_task = asyncio.ensure_future(
                 self._run_in_executor_with_context(run_sync)
             )
@@ -23038,12 +23036,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         break
                     # Agent still running — check inactivity.
                     _agent_ref = agent_holder[0]
-                    # [LOCAL MOD] Floor the idle clock at _executor_start: on
-                    # the first turn after a reused session, the agent's
-                    # _last_activity_ts is stale (hours old from the previous
-                    # exchange), which would fire the timeout immediately.
-                    # Measuring from the later of (last activity, executor
-                    # start) gives each new turn a fresh inactivity budget.
+                    # [LOCAL MOD: idle-clock floor] On the first turn after a
+                    # reused session, the agent's _last_activity_ts is stale
+                    # (hours old from the previous exchange), which would fire
+                    # the timeout immediately. Measuring from the later of
+                    # (last activity, executor start) gives each new turn a
+                    # fresh inactivity budget.
                     _last_ts = 0.0
                     if _agent_ref and hasattr(_agent_ref, "get_activity_summary"):
                         try:
@@ -23051,8 +23049,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             _last_ts = _act.get("last_activity_ts", 0.0)
                         except Exception:
                             pass
-                    _effective_baseline = max(_last_ts, _executor_start)
-                    _idle_secs = time.time() - _effective_baseline
+                    _idle_secs = time.time() - max(_last_ts, _executor_start)
                     # Staged warning: fire once before escalating to full timeout.
                     if (not _warning_fired and _agent_warning is not None
                             and _idle_secs >= _agent_warning):

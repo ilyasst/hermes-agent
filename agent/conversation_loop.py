@@ -112,6 +112,19 @@ _API_CALL_MODULES = frozenset({
     "chat_completion_helpers",
 })
 
+_USER_TURN_HEADER_ONLY_RE = re.compile(
+    r"\A\s*user\s*\n\s*\[[^\]\n]+\][^\n]*(?:\n.*)?\Z",
+    re.DOTALL,
+)
+
+
+def _is_user_turn_header_only(content: str) -> bool:
+    """Return whether visible output is only a leaked next-user turn."""
+    return bool(
+        isinstance(content, str)
+        and _USER_TURN_HEADER_ONLY_RE.fullmatch(content)
+    )
+
 
 def _apply_active_turn_redirect(agent: Any, messages: List[Dict[str, Any]], text: str) -> None:
     """Append a provider-safe checkpoint and correction to the live turn.
@@ -6014,6 +6027,21 @@ def run_conversation(
                 # chokepoint below, after final_msg is built, so it catches
                 # every path that reaches turn finalization, not just this one.)
                 final_response = assistant_message.content or ""
+
+                # Stop sequences and delivery sanitizers prevent a generated
+                # next-user header from reaching the platform. If that header
+                # is the entire completion, classify it as empty here so the
+                # existing bounded retry path can recover instead of letting a
+                # downstream sanitizer turn it into a generic no-response
+                # error. A real answer followed by a leaked suffix remains
+                # non-empty and is handled at the delivery boundary.
+                if _is_user_turn_header_only(final_response):
+                    logger.warning(
+                        "Header-only leaked user turn — treating response "
+                        "as empty for bounded recovery (model=%s)",
+                        agent.model,
+                    )
+                    final_response = ""
                 
                 # Fix: unmute output when entering the no-tool-call branch
                 # so the user can see empty-response warnings and recovery
@@ -6032,7 +6060,10 @@ def run_conversation(
                     _partial_streamed = (
                         getattr(agent, "_current_streamed_assistant_text", "") or ""
                     )
-                    if agent._has_content_after_think_block(_partial_streamed):
+                    if (
+                        agent._has_content_after_think_block(_partial_streamed)
+                        and not _is_user_turn_header_only(_partial_streamed)
+                    ):
                         _turn_exit_reason = "partial_stream_recovery"
                         _recovered = agent._strip_think_blocks(_partial_streamed).strip()
                         logger.info(

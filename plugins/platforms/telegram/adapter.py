@@ -24,66 +24,6 @@ from typing import Dict, List, Optional, Set, Any
 
 logger = logging.getLogger(__name__)
 
-# [LOCAL] gw-card shim loader (ported from the peacewalker fleet fork).
-# Ownership comes from the GENERATED artifact (the gw.cards handled subset);
-# no prefix list is kept here, because a hand-maintained one drifts and has
-# (gw#36 removed exactly such a dead copy from this adapter).
-# Absence of the module is the steady state on a host that does not run
-# cards, and is silent; a module that IS installed but broken is a real
-# fault and is reported.
-_GW_CARD_MODULE = "tools.gw_card_handler"
-
-
-def _gw_card_module(adapter_name):
-    try:
-        import tools.gw_card_handler as mod  # noqa: PLC0415
-    except ModuleNotFoundError as exc:
-        if getattr(exc, "name", None) == _GW_CARD_MODULE:
-            return None                # not installed here - expected, quiet
-        logger.error("[%s] gw-card handler is installed but its imports "
-                     "fail: %s", adapter_name, exc)
-        return None
-    except Exception as exc:
-        logger.error("[%s] gw-card handler failed to import: %s",
-                     adapter_name, exc)
-        return None
-    return mod
-
-
-def _gw_card_entrypoints(adapter_name, predicate, handler):
-    mod = _gw_card_module(adapter_name)
-    if mod is None:
-        return None, None
-    try:
-        fn_p = getattr(mod, predicate, None)
-        fn_h = getattr(mod, handler, None)
-    except ImportError as exc:
-        logger.error("[%s] gw-card handler is installed but its imports "
-                     "fail: %s", adapter_name, exc)
-        return None, None
-    except Exception as exc:
-        logger.error("[%s] gw-card handler failed while resolving %s/%s: %s",
-                     adapter_name, predicate, handler, exc)
-        return None, None
-    if not callable(fn_p) or not callable(fn_h):
-        logger.error("[%s] gw-card handler is missing %s/%s - deployed "
-                     "module is stale or partial", adapter_name, predicate,
-                     handler)
-        return None, None
-    return fn_p, fn_h
-
-
-def _gw_card_hooks(adapter_name):
-    return _gw_card_entrypoints(adapter_name, "is_gw_card",
-                                "handle_gw_card_callback")
-
-
-def _gw_card_command_hooks(adapter_name):
-    return _gw_card_entrypoints(adapter_name, "is_gw_card_command",
-                                "handle_gw_card_command")
-
-
-
 def _redact_telegram_error_text(error: object) -> str:
     """Redact secrets from Telegram transport errors before logging or returning them."""
     text = "" if error is None else str(error)
@@ -321,6 +261,7 @@ sys.path.insert(0, str(_Path(__file__).resolve().parents[3]))
 
 from gateway.authz_mixin import _coerce_allow_set
 from gateway.config import Platform, PlatformConfig
+from gateway.gw_cards import handler as gw_cards_handler
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -6527,27 +6468,18 @@ class TelegramAdapter(BasePlatformAdapter):
         if not query or not query.data:
             return
         data = query.data
-        # [LOCAL] gw-card interception. Delegation happens BEFORE any
-        # acknowledgement: a missing or failing handler leaves the callback
-        # to the native chain rather than acking and dropping it, and
-        # gw.cards is the sole acknowledger for taps it claims. A claimed
-        # tap that fails stays visibly stuck rather than falling through to
-        # a native handler that does not own the prefix.
-        _gw_is_card, _gw_handle = _gw_card_hooks(self.name)
-        if _gw_is_card is not None:
+
+        # A generated Cards handler claims only the prefixes it can serve.
+        # Missing or incomplete generated code is a pass-through, so the
+        # regular gateway never loses a callback to a stale installation.
+        cards = gw_cards_handler()
+        if cards is not None and cards.is_gw_card(data):
             try:
-                _gw_claimed = _gw_is_card(data)
-            except Exception as exc:
-                logger.error("[%s] gw-card predicate failed: %s",
-                             self.name, exc)
-                _gw_claimed = False
-            if _gw_claimed:
-                try:
-                    await _gw_handle(query, data, self.name)
-                except Exception as exc:
-                    logger.error("[%s] gw-card callback failed: %s",
-                                 self.name, exc)
-                return
+                await cards.handle_gw_card_callback(query, data, self.name)
+            except Exception:
+                logger.exception("[%s] GW Cards callback failed", self.name)
+            return
+
         query_message = getattr(query, "message", None)
         query_chat_id = getattr(query_message, "chat_id", None)
         query_chat = getattr(query_message, "chat", None)
@@ -8998,26 +8930,16 @@ class TelegramAdapter(BasePlatformAdapter):
         msg = self._effective_update_message(update)
         if not msg or not msg.text:
             return
-        # [LOCAL] gw-card command interception (before _should_process_message
-        # so it works without @-mention; auth enforced in the handler via
-        # GW_CARD_ALLOWED_USERS). A claimed command that fails is NOT handed
-        # back to the native chain — a second claimant acting after a visible
-        # gw failure can perform a different action than the one asked for.
-        _gw_is_cmd, _gw_handle_cmd = _gw_card_command_hooks(self.name)
-        if _gw_is_cmd is not None:
+        # Generated Cards commands are handled before the normal mention gate.
+        # The handler enforces its own Cards authorization; after it claims a
+        # command, falling through would run it a second time as an agent prompt.
+        cards = gw_cards_handler()
+        if cards is not None and cards.is_gw_card_command(msg.text):
             try:
-                _gw_claims = _gw_is_cmd(msg.text)
-            except Exception as exc:
-                logger.error("[%s] gw-card command predicate failed: %s",
-                             self.name, exc)
-                _gw_claims = False
-            if _gw_claims:
-                try:
-                    await _gw_handle_cmd(msg, msg.text, self.name)
-                except Exception as exc:
-                    logger.error("[%s] gw-card command failed: %s",
-                                 self.name, exc)
-                return
+                await cards.handle_gw_card_command(msg, msg.text, self.name)
+            except Exception:
+                logger.exception("[%s] GW Cards command failed", self.name)
+            return
         if not self._should_process_message(msg, is_command=True):
             return
         if not self._is_user_authorized_from_message(msg):
