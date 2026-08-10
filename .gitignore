@@ -197,3 +197,6 @@ native/fts5_cjk/*.so
 # across the fleet (2026-08-10).
 tools/gw_card_handler.py
 tools/gw_card_handler.py.*
+
+# Transient runtime marker (started timestamp + pid), never a tracked file.
+.lazy-refresh-incomplete
