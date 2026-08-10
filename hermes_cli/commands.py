@@ -955,6 +955,25 @@ def telegram_menu_commands(max_commands: int = 100) -> tuple[list[tuple[str, str
         all_commands.append((tg_name, str(description)[:40]))
         reserved_names.add(tg_name)
 
+    # [LOCAL MOD: quick-args] Surface user-defined quick_commands in the
+    # Telegram menu. Upstream intentionally hides them; we want them visible in
+    # autocomplete. Reads config.yaml; each entry may define a `description`.
+    try:
+        from hermes_cli.config import read_raw_config
+        _qc = (read_raw_config() or {}).get("quick_commands") or {}
+        if isinstance(_qc, dict):
+            for _name, _spec in _qc.items():
+                _tg = _sanitize_telegram_name(_name)
+                if not _tg or _tg in reserved_names:
+                    continue
+                _desc = "Quick command"
+                if isinstance(_spec, dict):
+                    _desc = str(_spec.get("description") or _desc)[:40]
+                all_commands.append((_tg, _desc))
+                reserved_names.add(_tg)
+    except Exception:
+        pass
+
     remaining_slots = max(0, max_commands - len(all_commands))
     entries, hidden_count = _collect_gateway_skill_entries(
         platform="telegram",
