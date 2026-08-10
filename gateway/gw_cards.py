@@ -63,10 +63,41 @@ def handler() -> ModuleType | None:
         "is_gw_card_command",
         "handle_gw_card_command",
     )
-    if not all(callable(getattr(mod, name, None)) for name in required):
+    # Resolve the entrypoints under the same guard as the import.  Attribute
+    # access can execute code: a module-level ``__getattr__`` (PEP 562) may
+    # import lazily, so a handler with a missing internal dependency would
+    # otherwise raise straight through this loader into the gateway instead of
+    # failing open.  An ImportError surfacing here is reported in the same
+    # words as an import-time one: moving where a fault appears must not change
+    # what the operator is told. (Re-derived from gw#51 review, 2026-08-10.)
+    try:
+        resolved = [getattr(mod, name, None) for name in required]
+    except Exception:
+        logger.exception("GW Cards handler could not be imported; leaving update untouched")
+        return None
+    if not all(callable(fn) for fn in resolved):
         logger.error("GW Cards handler is incomplete; leaving update untouched")
         return None
     return mod
+
+
+def claims(mod: ModuleType | None, predicate: str, value: str) -> bool:
+    """Whether the handler claims ``value``, failing OPEN if it cannot say.
+
+    Claiming is part of loading the optional capability, so a predicate that
+    raises is treated like a handler that is not installed: the update falls
+    through to the native chain rather than being swallowed. Once a tap IS
+    claimed the caller must not hand it back, because a second claimant acting
+    after a visible failure can perform a different action than the user asked
+    for. (Re-derived from gw#46 / gw#51 review, 2026-08-10.)
+    """
+    if mod is None:
+        return False
+    try:
+        return bool(getattr(mod, predicate)(value))
+    except Exception:
+        logger.exception("GW Cards %s failed; leaving update to the native chain", predicate)
+        return False
 
 
 def command_menu_entries() -> list[tuple[str, str]]:

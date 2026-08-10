@@ -261,7 +261,7 @@ sys.path.insert(0, str(_Path(__file__).resolve().parents[3]))
 
 from gateway.authz_mixin import _coerce_allow_set
 from gateway.config import Platform, PlatformConfig
-from gateway.gw_cards import handler as gw_cards_handler
+from gateway.gw_cards import claims as gw_cards_claims, handler as gw_cards_handler
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -6473,7 +6473,7 @@ class TelegramAdapter(BasePlatformAdapter):
         # Missing or incomplete generated code is a pass-through, so the
         # regular gateway never loses a callback to a stale installation.
         cards = gw_cards_handler()
-        if cards is not None and cards.is_gw_card(data):
+        if gw_cards_claims(cards, "is_gw_card", data):
             try:
                 await cards.handle_gw_card_callback(query, data, self.name)
             except Exception:
@@ -8934,7 +8934,7 @@ class TelegramAdapter(BasePlatformAdapter):
         # The handler enforces its own Cards authorization; after it claims a
         # command, falling through would run it a second time as an agent prompt.
         cards = gw_cards_handler()
-        if cards is not None and cards.is_gw_card_command(msg.text):
+        if gw_cards_claims(cards, "is_gw_card_command", msg.text):
             try:
                 await cards.handle_gw_card_command(msg, msg.text, self.name)
             except Exception:

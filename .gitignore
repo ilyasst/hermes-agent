@@ -189,3 +189,11 @@ native/fts5_cjk/*.so
 *.bak
 *.bak-*
 .brv/
+
+# GW renders tools/gw_card_handler.py per host during `gw install render-cards`.
+# It is a generated, host-specific artifact: gateway/gw_cards.py loads it by
+# explicit file path, and a host without one simply claims nothing. Tracking it
+# made every regeneration a dirty tracked file that blocked branch switches
+# across the fleet (2026-08-10).
+tools/gw_card_handler.py
+tools/gw_card_handler.py.*
