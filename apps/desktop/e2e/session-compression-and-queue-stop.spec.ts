@@ -34,6 +34,27 @@ async function waitForTranscript(page: Page, text: string, timeout = 90_000): Pr
   )
 }
 
+/** Wait until `count` assistant replies have landed.
+ *
+ * waitForTranscript is an `includes` check, so once the first mock reply is on
+ * screen it returns immediately for every later turn — it cannot tell you that
+ * turn 3 finished. Counting occurrences can, and the difference matters:
+ * a slash command issued while the previous turn is still streaming is
+ * REFUSED by the app ("session busy — /interrupt the current turn before
+ * /compress"), which is silent here because the refusal lands in the
+ * transcript rather than throwing.
+ */
+async function waitForReplyCount(page: Page, count: number, timeout = 90_000): Promise<void> {
+  await page.waitForFunction(
+    ({ expected, want }) => {
+      const text = document.querySelector('[data-slot="aui_thread-viewport"]')?.textContent ?? ''
+      return text.split(expected).length - 1 >= want
+    },
+    { expected: MOCK_REPLY, want: count },
+    { timeout },
+  )
+}
+
 test.describe('session compression', () => {
   test.describe.configure({ mode: 'serial' })
 
@@ -62,18 +83,24 @@ test.describe('session compression', () => {
     await send(page, 'E2E_COMPRESSION_THIRD')
     await expect.poll(() => receivedUserTexts().filter(text => text === 'E2E_COMPRESSION_THIRD').length).toBe(1)
 
-    // Commit the command before typing its argument. This waits for the async
-    // completion request on cold CI workers, then uses the composer's own
-    // keyboard accept path to replace the `/compress` trigger with a command
-    // chip. Clicking a later completion after typing the argument can insert a
-    // second command token (for example `//compress ...`) as plain text.
-    const composer = page.locator('[contenteditable="true"]').first()
-    await composer.click()
-    await composer.type('/compress', { delay: 15 })
-    await page.getByText('/compress').first().waitFor({ state: 'visible' })
-    await page.keyboard.press('Enter')
-    await composer.type(' preserve the three test turns', { delay: 15 })
-    await page.keyboard.press('Enter')
+    // All three turns must be COMPLETE, not merely delivered. The polls above
+    // only confirm the mock server received each user message; the assistant's
+    // reply can still be streaming. /compress against a busy session is
+    // refused with "session busy — /interrupt the current turn before
+    // /compress", the transcript never says "Compressed", and the poll below
+    // burns its full 90s. That is the CI flake: fast workers finish turn 3
+    // before this point, loaded ones do not.
+    await waitForReplyCount(page, 3)
+
+    // Submit the command in one insertText rather than typing it and accepting
+    // a completion chip. Per-keystroke typing opens the completion drawer, and
+    // the drawer then competes for the argument text and for the submitting
+    // Enter: instrumented runs showed ' preserve the three test turns' arriving
+    // as '/compress  turns' with the drawer still open, so Enter accepted a
+    // completion instead of sending and nothing dispatched at all. insertText
+    // fires no per-character events, so the drawer never opens and the command
+    // submits directly.
+    await pasteAndSend(page, '/compress preserve the three test turns')
     await expect
       .poll(
         () => page.locator('[data-slot="aui_thread-viewport"]').textContent(),
