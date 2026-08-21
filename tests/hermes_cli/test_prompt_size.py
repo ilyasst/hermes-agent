@@ -122,7 +122,10 @@ def test_blank_slate_prompt_size_counts_only_minimal_tools(isolated_home):
 
     data = compute_prompt_breakdown("cli")
 
-    assert data["tools"]["count"] == 6
+    # 6 upstream file+terminal tools, plus the fork-only ``fast_shell`` that
+    # 5ce895a23 registers into the ``terminal`` toolset. See the matching note
+    # in tests/hermes_cli/test_setup_blank_slate.py.
+    assert data["tools"]["count"] == 7
 
 
 def test_skills_index_reflects_installed_skills(isolated_home):
