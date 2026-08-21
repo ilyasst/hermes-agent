@@ -67,10 +67,21 @@ test.describe('session compression', () => {
     // keyboard accept path to replace the `/compress` trigger with a command
     // chip. Clicking a later completion after typing the argument can insert a
     // second command token (for example `//compress ...`) as plain text.
+    // Scope the wait to the completion listbox. `page.getByText('/compress')`
+    // also matches the composer's OWN typed text, which is already visible, so
+    // on a cold worker it resolves before the async completion request returns
+    // — the very race this wait exists to prevent. Enter then submits raw text
+    // instead of accepting the chip, no compression happens, and the poll below
+    // times out at 90s. That is the ~50% CI flake.
+    //
+    // role="listbox" is the real trigger popover; HelpHint reuses the same
+    // data-slot with role="dialog", and its COMMON_COMMAND_KEYS does not
+    // include /compress, so this locator resolves only to the true completion.
     const composer = page.locator('[contenteditable="true"]').first()
+    const completionList = page.locator('[data-slot="composer-completion-drawer"][role="listbox"]')
     await composer.click()
     await composer.type('/compress', { delay: 15 })
-    await page.getByText('/compress').first().waitFor({ state: 'visible' })
+    await completionList.getByText('/compress').first().waitFor({ state: 'visible' })
     await page.keyboard.press('Enter')
     await composer.type(' preserve the three test turns', { delay: 15 })
     await page.keyboard.press('Enter')
