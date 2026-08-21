@@ -86,8 +86,12 @@ class TestBlankSlateMinimalToolsets:
         names = sorted(
             {(d.get("function") or {}).get("name") or d.get("name") for d in defs}
         )
-        assert names == ["patch", "process", "read_file", "search_files",
-                         "terminal", "write_file"]
+        # [LOCAL] fast_shell is a fork-only tool registered into the ``terminal``
+        # toolset (5ce895a23), so it legitimately joins the Blank Slate surface.
+        # The list stays explicit on purpose: anything that grows this set also
+        # grows every Blank Slate prompt, which should be a deliberate call.
+        assert names == ["fast_shell", "patch", "process", "read_file",
+                         "search_files", "terminal", "write_file"]
 
     def test_tool_schema_survives_disabled_toolsets_from_config(self):
         """Regression: disabled_toolsets must not erase the minimal Blank Slate
@@ -110,8 +114,12 @@ class TestBlankSlateMinimalToolsets:
         names = sorted(
             {(d.get("function") or {}).get("name") or d.get("name") for d in defs}
         )
-        assert names == ["patch", "process", "read_file", "search_files",
-                         "terminal", "write_file"]
+        # [LOCAL] fast_shell is a fork-only tool registered into the ``terminal``
+        # toolset (5ce895a23), so it legitimately joins the Blank Slate surface.
+        # The list stays explicit on purpose: anything that grows this set also
+        # grows every Blank Slate prompt, which should be a deliberate call.
+        assert names == ["fast_shell", "patch", "process", "read_file",
+                         "search_files", "terminal", "write_file"]
 
 
 class TestBlankSlateMinimizeConfig:

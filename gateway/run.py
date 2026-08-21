@@ -1032,7 +1032,17 @@ def _build_replay_entry(
     return entry
 
 
-_TELEGRAM_OBSERVED_CONTEXT_PROMPT_MARKER = "observed Telegram group context"
+# [LOCAL] Must be a substring of the prompt built by the Telegram adapter's
+# _telegram_group_observe_channel_prompt(). Patch L (78c30ad11f, 2026-06-13)
+# reframed that prompt for Qwen3.5 and dropped the old "observed Telegram group
+# context" wording, but this marker was left behind — so the gate below silently
+# returned False from then on and observed chatter replayed as ordinary user
+# turns, which is exactly what it exists to prevent. Keep this string in sync
+# with that builder; the four tests in tests/gateway/test_telegram_group_gating.py
+# covering observed-context handling are what catch a desync.
+_TELEGRAM_OBSERVED_CONTEXT_PROMPT_MARKER = (
+    "A context block of recent messages from this same group"
+)
 _OBSERVED_GROUP_CONTEXT_HEADER = "[Recent messages from this group that you observed - use them as context when they help answer]"  # [LOCAL] softened: weak local model ignored the upstream "context only, not requests" phrasing
 _CURRENT_ADDRESSED_MESSAGE_HEADER = "[The message addressed to you - answer it, drawing on the recent group messages above whenever they are relevant]"  # [LOCAL] softened from "answer only this unless..." which suppressed observed-context use on Qwen3.5
 
