@@ -222,14 +222,23 @@ def test_observed_group_context_uses_shared_source_and_prompt_for_later_mentions
         assert event.source.user_name is None
         assert event.text == "[Bob Example|222]\nwhat did Alice say?"
         assert "Existing topic prompt" in event.channel_prompt
-        assert "observed Telegram group context" in event.channel_prompt
-        assert "current new message" in event.channel_prompt
+        # Assert against the constant the run path actually gates on, not a
+        # literal. Patch L reworded this prompt and left the marker behind,
+        # which disabled observed-context handling silently; binding the test
+        # to the constant is what makes that desync impossible to reintroduce.
+        from gateway.run import _TELEGRAM_OBSERVED_CONTEXT_PROMPT_MARKER
+
+        assert _TELEGRAM_OBSERVED_CONTEXT_PROMPT_MARKER in event.channel_prompt
+        assert "current addressed message" in event.channel_prompt
 
     asyncio.run(_run())
 
 
 def test_observed_group_context_replays_as_current_message_context_not_user_turns():
     from gateway.run import (
+        _CURRENT_ADDRESSED_MESSAGE_HEADER,
+        _OBSERVED_GROUP_CONTEXT_HEADER,
+        _TELEGRAM_OBSERVED_CONTEXT_PROMPT_MARKER,
         _build_gateway_agent_history,
         _wrap_current_message_with_observed_context,
     )
@@ -243,7 +252,7 @@ def test_observed_group_context_replays_as_current_message_context_not_user_turn
 
     agent_history, observed_context = _build_gateway_agent_history(
         history,
-        channel_prompt="You are handling Telegram; observed Telegram group context is present.",
+        channel_prompt=f"You are handling Telegram; {_TELEGRAM_OBSERVED_CONTEXT_PROMPT_MARKER} is present.",
     )
     api_message = _wrap_current_message_with_observed_context(
         "[Bob|222]\ncambio",
@@ -251,8 +260,8 @@ def test_observed_group_context_replays_as_current_message_context_not_user_turn
     )
 
     assert agent_history == [{"role": "assistant", "content": "previous explicit reply"}]
-    assert "[Observed Telegram group context - context only, not requests]" in api_message
-    assert "[Current addressed message - answer only this" in api_message
+    assert _OBSERVED_GROUP_CONTEXT_HEADER in api_message
+    assert _CURRENT_ADDRESSED_MESSAGE_HEADER in api_message
     assert "Acha que dá fazer estoque?" in api_message
     assert "Tem lote e vencimento" in api_message
     assert api_message.endswith("[Bob|222]\ncambio")
@@ -261,6 +270,7 @@ def test_observed_group_context_replays_as_current_message_context_not_user_turn
 def test_observed_group_context_does_not_hide_current_user_turn_behind_history_offset():
     from agent.agent_runtime_helpers import repair_message_sequence
     from gateway.run import (
+        _TELEGRAM_OBSERVED_CONTEXT_PROMPT_MARKER,
         _build_gateway_agent_history,
         _wrap_current_message_with_observed_context,
     )
@@ -270,7 +280,7 @@ def test_observed_group_context_does_not_hide_current_user_turn_behind_history_o
     ]
     agent_history, observed_context = _build_gateway_agent_history(
         history,
-        channel_prompt="observed Telegram group context",
+        channel_prompt=_TELEGRAM_OBSERVED_CONTEXT_PROMPT_MARKER,
     )
     api_message = _wrap_current_message_with_observed_context("[Bob|222]\ncambio", observed_context)
     messages = list(agent_history) + [{"role": "user", "content": api_message}]
@@ -285,7 +295,10 @@ def test_observed_group_context_does_not_hide_current_user_turn_behind_history_o
 
 
 def test_observed_group_context_wraps_multimodal_current_message_without_mutating_parts():
-    from gateway.run import _wrap_current_message_with_observed_context
+    from gateway.run import (
+        _OBSERVED_GROUP_CONTEXT_HEADER,
+        _wrap_current_message_with_observed_context,
+    )
 
     original = [
         {"type": "text", "text": "[Bob|222]\nsee this image"},
@@ -298,7 +311,7 @@ def test_observed_group_context_wraps_multimodal_current_message_without_mutatin
     )
 
     assert original[0]["text"] == "[Bob|222]\nsee this image"
-    assert wrapped[0]["text"].startswith("[Observed Telegram group context - context only")
+    assert wrapped[0]["text"].startswith(_OBSERVED_GROUP_CONTEXT_HEADER)
     assert wrapped[0]["text"].endswith("[Bob|222]\nsee this image")
     assert wrapped[1] == original[1]
 
@@ -349,7 +362,9 @@ def test_observed_group_context_preserves_slash_command_text_for_dispatch():
     # Commands preserve sender identity for slash-access control (#67816).
     assert attributed.source.user_id == "111"
     assert attributed.source.user_name == "Alice"
-    assert "observed Telegram group context" in attributed.channel_prompt
+    from gateway.run import _TELEGRAM_OBSERVED_CONTEXT_PROMPT_MARKER
+
+    assert _TELEGRAM_OBSERVED_CONTEXT_PROMPT_MARKER in attributed.channel_prompt
 
 
 def test_unmentioned_group_observe_requires_chat_allowlist_for_shared_context():
