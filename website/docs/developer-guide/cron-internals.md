@@ -302,7 +302,8 @@ these values to the ephemeral agent for each run. Tool-counted or terminal-aware
 runs use sequential dispatch so the supervisor can interrupt before an
 over-budget or post-terminal call executes. Saved outputs include only numeric
 counters and a fixed terminal-reason enum; tool arguments and results are not
-copied into run metrics.
+copied into run metrics. `recorded` and `already_recorded` are terminal success;
+`claim_lost` is a terminal failure that quarantines the rest of the agent run.
 
 ## Related Docs
 

@@ -84,7 +84,9 @@ Integrations that atomically record work can also pass
 `record_attempt` signal with either `recorded` or `already_recorded`, the
 scheduler stops the agent and treats the run as a silent success. Tool calls are
 ordered for such jobs, so calls after the terminal result cannot start. Other
-result shapes and arbitrary reason values do not trigger this behavior.
+result shapes and arbitrary reason values do not trigger this behavior. A
+validated `claim_lost` result also stops later tool calls, but marks the run
+failed so it remains visible to the operator.
 
 ## Skill-backed cron jobs
 

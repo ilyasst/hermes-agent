@@ -282,7 +282,7 @@ from cron.executions import create_execution, finish_execution, mark_execution_r
 from cron.run_limits import (
     CronRunLimits,
     CronRunMonitor,
-    TERMINAL_REASONS,
+    TERMINAL_SUCCESS_REASONS,
     metrics_markdown,
 )
 
@@ -3693,7 +3693,11 @@ def run_job(
             except Exception:
                 pass
         _turns = int(result.get("api_call_count") or _activity.get("api_call_count") or 0)
-        _terminal_success = _run_monitor.terminal_reason in TERMINAL_REASONS
+        _terminal_success = (
+            _run_monitor.terminal_reason in TERMINAL_SUCCESS_REASONS
+        )
+        if _run_monitor.terminal_reason == "claim_lost":
+            raise RuntimeError("Cron run lost its workflow claim")
         if _run_monitor.terminal_reason == "tool_call_budget":
             raise RuntimeError("Cron run exhausted its tool-call budget")
         if (job.get("max_turns") is not None

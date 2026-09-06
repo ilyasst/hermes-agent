@@ -70,6 +70,13 @@ def test_untrusted_terminal_reason_cannot_stop_the_run():
     ) == {"record_attempt": True, "terminal": False, "reason": None}
 
 
+def test_lost_claim_is_a_valid_terminal_failure_signal():
+    assert terminal_signal(
+        {"_hermes": {"kind": "record_attempt", "terminal": True,
+                     "reason": "claim_lost"}}
+    ) == {"record_attempt": True, "terminal": True, "reason": "claim_lost"}
+
+
 def test_monitor_stops_after_successful_record_and_reports_content_free_metrics():
     ticks = iter([10.0, 10.125])
     monitor = CronRunMonitor(
@@ -357,6 +364,52 @@ def test_scheduler_stops_and_fails_when_tool_budget_is_consumed(tmp_path):
     assert "tool-call budget" in error
     assert "Tool calls: 2" in output
     assert "Terminal reason: `tool_call_budget`" in output
+    assert instances[0].interruptions
+
+
+def test_scheduler_stops_a_session_that_lost_its_workflow_claim(tmp_path):
+    instances = []
+
+    class ClaimLostAgent:
+        _format_turn_completion_explanation = staticmethod(lambda _reason: "")
+
+        def __init__(self, *args, **kwargs):
+            self.start = kwargs["tool_start_callback"]
+            self.complete = kwargs["tool_complete_callback"]
+            self.interruptions = []
+            instances.append(self)
+
+        def interrupt(self, message=None):
+            self.interruptions.append(message)
+
+        def run_conversation(self, _prompt):
+            self.start("call-1", "terminal", {})
+            self.complete(
+                "call-1", "terminal", {},
+                {"_hermes": {"kind": "record_attempt", "terminal": True,
+                             "reason": "claim_lost"}},
+            )
+            return {"final_response": "stopped", "completed": False,
+                    "failed": True, "api_call_count": 1}
+
+        def close(self):
+            pass
+
+    success, output, final_response, error = _run_scheduler_job(
+        tmp_path,
+        {
+            "id": "claim-lost-job",
+            "name": "Claim lost",
+            "prompt": "Process one synthetic work item",
+            "stop_on_terminal_signal": True,
+        },
+        ClaimLostAgent,
+    )
+
+    assert success is False
+    assert final_response == ""
+    assert "lost its workflow claim" in error
+    assert "Terminal reason: `claim_lost`" in output
     assert instances[0].interruptions
 
 

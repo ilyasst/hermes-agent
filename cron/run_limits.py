@@ -10,7 +10,8 @@ from typing import Any, Callable
 
 
 TERMINAL_SIGNAL_KEY = "_hermes"
-TERMINAL_REASONS = frozenset({"recorded", "already_recorded"})
+TERMINAL_SUCCESS_REASONS = frozenset({"recorded", "already_recorded"})
+TERMINAL_STOP_REASONS = TERMINAL_SUCCESS_REASONS | {"claim_lost"}
 
 
 def optional_positive_int(value: Any, field: str) -> int | None:
@@ -85,8 +86,10 @@ def terminal_signal(result: Any) -> dict | None:
     reason = signal.get("reason")
     return {
         "record_attempt": True,
-        "terminal": signal.get("terminal") is True and reason in TERMINAL_REASONS,
-        "reason": reason if reason in TERMINAL_REASONS else None,
+        "terminal": (
+            signal.get("terminal") is True and reason in TERMINAL_STOP_REASONS
+        ),
+        "reason": reason if reason in TERMINAL_STOP_REASONS else None,
     }
 
 
@@ -138,7 +141,7 @@ class CronRunMonitor:
         if limit is None:
             return False
         with self._lock:
-            if self.terminal_reason in TERMINAL_REASONS:
+            if self.terminal_reason:
                 return False
             if self._clock() - self._started_at < limit:
                 return False
@@ -168,7 +171,7 @@ class CronRunMonitor:
 def metrics_markdown(metrics: dict) -> str:
     """Render only fixed labels, numbers, and a normalized reason enum."""
     reason = str(metrics.get("terminal_reason") or "completed")
-    if reason not in TERMINAL_REASONS | {
+    if reason not in TERMINAL_STOP_REASONS | {
         "completed", "tool_call_budget", "turn_budget", "wall_timeout",
         "inactivity_timeout", "agent_error",
     }:
