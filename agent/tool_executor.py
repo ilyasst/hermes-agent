@@ -1210,6 +1210,26 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             except Exception as cb_err:
                 logging.debug(f"Tool start callback error: {cb_err}")
 
+        # A run supervisor may consume the last available tool slot in its
+        # start callback. Re-check before dispatch so a denied over-budget call
+        # and every later call in this assistant batch remain side-effect free.
+        if not _execution_blocked and agent._interrupt_requested:
+            remaining_calls = assistant_message.tool_calls[i - 1:]
+            for skipped_tc in remaining_calls:
+                skipped_name = skipped_tc.function.name
+                messages.append(make_tool_result_message(
+                    skipped_name,
+                    f"[Tool execution cancelled — {skipped_name} was skipped by the run supervisor]",
+                    skipped_tc.id,
+                    effect_disposition="none",
+                ))
+                _flush_session_db_after_tool_progress(
+                    agent,
+                    messages,
+                    stage=f"supervisor-cancelled tool result {skipped_name}",
+                )
+            break
+
         # Checkpoint: snapshot working dir before file-mutating tools
         if not _execution_blocked and function_name in {"write_file", "patch"} and agent._checkpoint_mgr.enabled:
             try:

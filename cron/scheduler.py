@@ -279,6 +279,12 @@ _LEGACY_HOME_TARGET_ENV_VARS = {
 
 from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_run, claim_dispatch, heartbeat_run_claim
 from cron.executions import create_execution, finish_execution, mark_execution_running
+from cron.run_limits import (
+    CronRunLimits,
+    CronRunMonitor,
+    TERMINAL_REASONS,
+    metrics_markdown,
+)
 
 # Sentinel: when a cron agent has nothing new to report, it can start its
 # response with this marker to suppress delivery.  Output is still saved
@@ -2093,6 +2099,7 @@ _DEFAULT_SCRIPT_TIMEOUT = 3600  # seconds (1 hour)
 # Backward-compatible module override used by tests and emergency monkeypatches.
 _SCRIPT_TIMEOUT = _DEFAULT_SCRIPT_TIMEOUT
 _RUN_CLAIM_HEARTBEAT_SECONDS = 60.0
+_RUN_MONITOR_POLL_SECONDS = 5.0
 
 
 def _get_script_timeout() -> int:
@@ -3004,6 +3011,7 @@ def run_job(
     logger.info("Prompt: %s", prompt[:100])
 
     agent = None
+    _run_monitor = None
 
     # Mark this as a cron session so the approval system can apply cron_mode.
     # This env var is process-wide and persists for the lifetime of the
@@ -3237,8 +3245,18 @@ def run_job(
                     logger.warning("Job '%s': failed to parse prefill messages file '%s': %s", job_id, pfpath, e)
                     prefill_messages = None
 
-        # Max iterations
-        max_iterations = _cfg.get("agent", {}).get("max_turns") or _cfg.get("max_turns") or 500
+        # Per-job run limits override only this ephemeral cron agent. Jobs
+        # without explicit fields retain the global turn limit and historical
+        # inactivity-only timeout behavior.
+        default_max_iterations = (
+            _cfg.get("agent", {}).get("max_turns")
+            or _cfg.get("max_turns")
+            or 500
+        )
+        _run_limits = CronRunLimits.from_job(
+            job, default_max_turns=default_max_iterations
+        )
+        max_iterations = _run_limits.max_turns
 
         # Provider routing
         pr = _cfg.get("provider_routing") or {}
@@ -3435,6 +3453,27 @@ def run_job(
                 job_id, _mcp_exc,
             )
 
+        _run_monitor = CronRunMonitor(_run_limits)
+        _agent_ref: dict[str, Any] = {}
+
+        def _stop_for_run_reason(reason: str) -> None:
+            _live_agent = _agent_ref.get("agent")
+            if _live_agent is not None and hasattr(_live_agent, "interrupt"):
+                # This is a hard supervisor stop, not user steering. Passing
+                # the reason as an interrupt message would make it part of the
+                # agent result and can invite another recovery turn.
+                _live_agent.interrupt()
+
+        def _run_tool_started(*_args, **_kwargs) -> None:
+            _reason = _run_monitor.tool_started()
+            if _reason:
+                _stop_for_run_reason(_reason)
+
+        def _run_tool_completed(_tool_id, _name, _args, result) -> None:
+            _reason = _run_monitor.tool_completed(result)
+            if _reason:
+                _stop_for_run_reason(_reason)
+
         agent = AIAgent(
             model=model,
             api_key=runtime.get("api_key"),
@@ -3467,6 +3506,12 @@ def run_job(
             platform="cron",
             session_id=_cron_session_id,
             session_db=_session_db,
+            tool_start_callback=_run_tool_started,
+            tool_complete_callback=_run_tool_completed,
+        )
+        _agent_ref["agent"] = agent
+        agent._force_sequential_tool_calls = (
+            _run_limits.requires_sequential_tools
         )
         
         # Run the agent with an *inactivity*-based timeout: the job can run
@@ -3501,7 +3546,6 @@ def run_job(
             )
             _cron_timeout = _default_cron_timeout
         _cron_inactivity_limit = _cron_timeout if _cron_timeout > 0 else None
-        _POLL_INTERVAL = 5.0
         # Keep the one-shot run_claim fresh while the run is alive (#62002):
         # the claim TTL is a dead-owner detector, but without a heartbeat a
         # run that legitimately outlives it (stream stall, laptop asleep
@@ -3541,15 +3585,17 @@ def run_job(
         _cron_context = contextvars.copy_context()
         _cron_future = _cron_pool.submit(_cron_context.run, agent.run_conversation, prompt)
         _inactivity_timeout = False
+        _wall_timeout = False
         try:
-            if _cron_inactivity_limit is None:
+            if (_cron_inactivity_limit is None
+                    and _run_limits.wall_timeout_seconds is None):
                 # Unlimited — no inactivity watchdog, but a one-shot still
                 # needs its run_claim heartbeat, so poll instead of blocking.
                 if _is_oneshot:
                     result = None
                     while True:
                         done, _ = concurrent.futures.wait(
-                            {_cron_future}, timeout=_POLL_INTERVAL,
+                            {_cron_future}, timeout=_RUN_MONITOR_POLL_SECONDS,
                         )
                         if done:
                             result = _cron_future.result()
@@ -3561,12 +3607,17 @@ def run_job(
                 result = None
                 while True:
                     done, _ = concurrent.futures.wait(
-                        {_cron_future}, timeout=_POLL_INTERVAL,
+                        {_cron_future}, timeout=_RUN_MONITOR_POLL_SECONDS,
                     )
                     if done:
                         result = _cron_future.result()
                         break
                     _heartbeat_run_claim_if_due()
+                    if _run_monitor.wall_timeout_reached():
+                        _wall_timeout = True
+                        _run_monitor.mark_terminal("wall_timeout")
+                        _stop_for_run_reason("wall_timeout")
+                        break
                     # Agent still running — check inactivity.
                     _idle_secs = 0.0
                     if hasattr(agent, "get_activity_summary"):
@@ -3575,7 +3626,8 @@ def run_job(
                             _idle_secs = _act.get("seconds_since_activity", 0.0)
                         except Exception:
                             pass
-                    if _idle_secs >= _cron_inactivity_limit:
+                    if (_cron_inactivity_limit is not None
+                            and _idle_secs >= _cron_inactivity_limit):
                         _inactivity_timeout = True
                         break
         except Exception:
@@ -3584,7 +3636,14 @@ def run_job(
         finally:
             _cron_pool.shutdown(wait=False, cancel_futures=True)
 
+        if _wall_timeout:
+            raise TimeoutError(
+                f"Cron job '{job_name}' exceeded its wall-clock limit of "
+                f"{_run_limits.wall_timeout_seconds}s"
+            )
+
         if _inactivity_timeout:
+            _run_monitor.mark_terminal("inactivity_timeout")
             # Build diagnostic summary from the agent's activity tracker.
             _activity = {}
             if hasattr(agent, "get_activity_summary"):
@@ -3627,6 +3686,20 @@ def run_job(
         # job's `last_status` set to "ok". Raise so the except handler below
         # builds the proper failure tuple. (issue #17855)
         turn_exit_reason = str(result.get("turn_exit_reason") or "")
+        _activity = {}
+        if hasattr(agent, "get_activity_summary"):
+            try:
+                _activity = agent.get_activity_summary()
+            except Exception:
+                pass
+        _turns = int(result.get("api_call_count") or _activity.get("api_call_count") or 0)
+        _terminal_success = _run_monitor.terminal_reason in TERMINAL_REASONS
+        if _run_monitor.terminal_reason == "tool_call_budget":
+            raise RuntimeError("Cron run exhausted its tool-call budget")
+        if (job.get("max_turns") is not None
+                and turn_exit_reason.startswith("max_iterations_reached(")):
+            _run_monitor.mark_terminal("turn_budget")
+            raise RuntimeError("Cron run exhausted its model-turn budget")
         final_response_text = (result.get("final_response") or "").strip()
         max_iteration_summary = (
             result.get("failed") is not True
@@ -3634,7 +3707,10 @@ def run_job(
             and turn_exit_reason.startswith("max_iterations_reached(")
             and bool(final_response_text)
         )
-        if result.get("failed") is True or (result.get("completed") is False and not max_iteration_summary):
+        if (not _terminal_success and (
+                result.get("failed") is True
+                or (result.get("completed") is False and not max_iteration_summary)
+        )):
             _err_text = (
                 result.get("error")
                 or final_response_text
@@ -3648,7 +3724,10 @@ def run_job(
                 job_name,
             )
 
-        final_response = result.get("final_response", "") or ""
+        final_response = (
+            SILENT_MARKER if _terminal_success
+            else result.get("final_response", "") or ""
+        )
         # Strip leaked placeholder text that upstream may inject on empty completions.
         if final_response.strip() == "(No response generated)":
             final_response = ""
@@ -3691,6 +3770,11 @@ def run_job(
 
 {logged_response}
 """
+        _metrics = _run_monitor.finish(
+            turns=_turns,
+            reason=(str(_run_monitor.terminal_reason or "completed")),
+        )
+        output += metrics_markdown(_metrics)
         
         logger.info("Job '%s' completed successfully", job_name)
         return True, output, final_response, None
@@ -3715,6 +3799,19 @@ def run_job(
 {error_msg}
 ```
 """
+        if _run_monitor is not None:
+            _activity = {}
+            if agent is not None and hasattr(agent, "get_activity_summary"):
+                try:
+                    _activity = agent.get_activity_summary()
+                except Exception:
+                    pass
+            _reason = _run_monitor.terminal_reason or "agent_error"
+            _metrics = _run_monitor.finish(
+                turns=int(_activity.get("api_call_count") or 0),
+                reason=_reason,
+            )
+            output += metrics_markdown(_metrics)
         return False, output, "", error_msg
 
     finally:

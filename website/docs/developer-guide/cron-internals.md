@@ -296,6 +296,14 @@ hermes cron run <job_id>            # Trigger immediate execution
 hermes cron remove <job_id>         # Delete a job
 ```
 
+Agent jobs may persist `max_turns`, `max_tool_calls`,
+`wall_timeout_seconds`, and `stop_on_terminal_signal`. The scheduler applies
+these values to the ephemeral agent for each run. Tool-counted or terminal-aware
+runs use sequential dispatch so the supervisor can interrupt before an
+over-budget or post-terminal call executes. Saved outputs include only numeric
+counters and a fixed terminal-reason enum; tool arguments and results are not
+copied into run metrics.
+
 ## Related Docs
 
 - [Cron Feature Guide](/user-guide/features/cron)

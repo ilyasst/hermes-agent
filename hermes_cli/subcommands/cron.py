@@ -70,6 +70,16 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
         "--workdir",
         help="Absolute path for the job to run from. Injects AGENTS.md / CLAUDE.md / .cursorrules from that directory and uses it as the cwd for terminal/file/code_exec tools. Omit to preserve old behaviour (no project context files).",
     )
+    cron_create.add_argument("--max-turns", type=int,
+                             help="Hard model-turn limit for one run")
+    cron_create.add_argument("--max-tool-calls", type=int,
+                             help="Hard executed-tool limit for one run")
+    cron_create.add_argument("--wall-timeout-seconds", type=int,
+                             help="Hard wall-clock limit for one run")
+    cron_create.add_argument(
+        "--stop-on-terminal-signal", action="store_true", default=False,
+        help="Stop successfully after a validated terminal tool result",
+    )
 
     # cron edit
     cron_edit = cron_subparsers.add_parser(
@@ -133,6 +143,23 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
     cron_edit.add_argument(
         "--workdir",
         help="Absolute path for the job to run from (injects AGENTS.md etc. and sets terminal cwd). Pass empty string to clear.",
+    )
+    cron_edit.add_argument("--max-turns", type=int,
+                           help="New hard model-turn limit")
+    cron_edit.add_argument("--max-tool-calls", type=int,
+                           help="New hard executed-tool limit")
+    cron_edit.add_argument("--wall-timeout-seconds", type=int,
+                           help="New hard wall-clock limit")
+    terminal_signal = cron_edit.add_mutually_exclusive_group()
+    terminal_signal.add_argument(
+        "--stop-on-terminal-signal", dest="stop_on_terminal_signal",
+        action="store_const", const=True, default=None,
+        help="Stop successfully after a validated terminal tool result",
+    )
+    terminal_signal.add_argument(
+        "--no-stop-on-terminal-signal", dest="stop_on_terminal_signal",
+        action="store_const", const=False,
+        help="Disable terminal-result stopping for this job",
     )
 
     # lifecycle actions

@@ -55,6 +55,8 @@ def test_cron_create_options():
         "--name", "daily", "--deliver", "origin", "--repeat", "3",
         "--skill", "a", "--skill", "b", "--no-agent",
         "--workdir", "/tmp/x",
+        "--max-turns", "8", "--max-tool-calls", "12",
+        "--wall-timeout-seconds", "90", "--stop-on-terminal-signal",
     ])
     assert ns.schedule == "0 9 * * *"
     assert ns.prompt == "daily task prompt"
@@ -64,6 +66,10 @@ def test_cron_create_options():
     assert ns.skills == ["a", "b"]
     assert ns.no_agent is True
     assert ns.workdir == "/tmp/x"
+    assert ns.max_turns == 8
+    assert ns.max_tool_calls == 12
+    assert ns.wall_timeout_seconds == 90
+    assert ns.stop_on_terminal_signal is True
 
 
 def test_cron_edit_no_agent_tristate():
@@ -72,6 +78,19 @@ def test_cron_edit_no_agent_tristate():
     assert parser.parse_args(["cron", "edit", "j", "--no-agent"]).no_agent is True
     assert parser.parse_args(["cron", "edit", "j", "--agent"]).no_agent is False
     assert parser.parse_args(["cron", "edit", "j"]).no_agent is None
+
+
+def test_cron_edit_terminal_signal_tristate():
+    parser = _build()
+    assert parser.parse_args(
+        ["cron", "edit", "j", "--stop-on-terminal-signal"]
+    ).stop_on_terminal_signal is True
+    assert parser.parse_args(
+        ["cron", "edit", "j", "--no-stop-on-terminal-signal"]
+    ).stop_on_terminal_signal is False
+    assert parser.parse_args(
+        ["cron", "edit", "j"]
+    ).stop_on_terminal_signal is None
 
 
 def test_cron_dispatch_func_is_injected_handler():

@@ -61,6 +61,31 @@ Every morning at 9am, check Hacker News for AI news and send me a summary on Tel
 
 Hermes will use the unified `cronjob` tool internally.
 
+## Bounding autonomous runs
+
+Agent-backed jobs can set independent limits for model turns, executed tool
+calls, and total wall-clock time. These limits apply to one run and leave the
+global interactive-agent configuration unchanged:
+
+```bash
+hermes cron create "every 15m" "Process one queued work item" \
+  --max-turns 8 \
+  --max-tool-calls 12 \
+  --wall-timeout-seconds 180
+```
+
+Use smaller budgets for simple checks and larger budgets for multi-step work.
+When any explicit budget is exhausted, the scheduler interrupts the ephemeral
+agent, marks the run failed, and retains content-free run metrics in the saved
+output: model turns, tool calls, duration, record attempts, and terminal reason.
+
+Integrations that atomically record work can also pass
+`--stop-on-terminal-signal`. After a tool returns the reserved validated
+`record_attempt` signal with either `recorded` or `already_recorded`, the
+scheduler stops the agent and treats the run as a silent success. Tool calls are
+ordered for such jobs, so calls after the terminal result cannot start. Other
+result shapes and arbitrary reason values do not trigger this behavior.
+
 ## Skill-backed cron jobs
 
 A cron job can load one or more skills before it runs the prompt.

@@ -350,6 +350,12 @@ def cron_create(args):
         script=getattr(args, "script", None),
         workdir=getattr(args, "workdir", None),
         no_agent=getattr(args, "no_agent", False) or None,
+        max_turns=getattr(args, "max_turns", None),
+        max_tool_calls=getattr(args, "max_tool_calls", None),
+        wall_timeout_seconds=getattr(args, "wall_timeout_seconds", None),
+        stop_on_terminal_signal=(
+            getattr(args, "stop_on_terminal_signal", False) or None
+        ),
     )
     if not result.get("success"):
         print(color(f"Failed to create job: {result.get('error', 'unknown error')}", Colors.RED))
@@ -413,6 +419,12 @@ def cron_edit(args):
         script=getattr(args, "script", None),
         workdir=getattr(args, "workdir", None),
         no_agent=getattr(args, "no_agent", None),
+        max_turns=getattr(args, "max_turns", None),
+        max_tool_calls=getattr(args, "max_tool_calls", None),
+        wall_timeout_seconds=getattr(args, "wall_timeout_seconds", None),
+        stop_on_terminal_signal=getattr(
+            args, "stop_on_terminal_signal", None
+        ),
     )
     if not result.get("success"):
         print(color(f"Failed to update job: {result.get('error', 'unknown error')}", Colors.RED))

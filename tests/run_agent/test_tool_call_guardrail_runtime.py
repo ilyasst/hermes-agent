@@ -112,6 +112,27 @@ def test_default_sequential_path_warns_repeated_exact_failure_without_blocking_e
     assert agent._tool_guardrail_halt_decision is None
 
 
+def test_supervisor_interrupt_in_start_callback_prevents_current_and_later_tools():
+    agent = _make_agent("web_search")
+    calls = [
+        _mock_tool_call("web_search", '{"query":"first"}', "c-first"),
+        _mock_tool_call("web_search", '{"query":"second"}', "c-second"),
+    ]
+    message = SimpleNamespace(content="", tool_calls=calls)
+    messages = []
+
+    def stop_before_dispatch(*_args):
+        agent._interrupt_requested = True
+
+    agent.tool_start_callback = stop_before_dispatch
+    with patch("run_agent.handle_function_call") as execute:
+        agent._execute_tool_calls_sequential(message, messages, "task-1")
+
+    execute.assert_not_called()
+    assert [item["tool_call_id"] for item in messages] == ["c-first", "c-second"]
+    assert all("skipped by the run supervisor" in item["content"] for item in messages)
+
+
 def test_config_enabled_hard_stop_blocks_repeated_exact_failure_before_execution():
     agent = _make_agent("web_search", config=_hard_stop_config())
     args = {"query": "same"}

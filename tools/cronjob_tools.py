@@ -598,6 +598,11 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
         result["enabled_toolsets"] = job["enabled_toolsets"]
     if job.get("workdir"):
         result["workdir"] = job["workdir"]
+    for field in ("max_turns", "max_tool_calls", "wall_timeout_seconds"):
+        if job.get(field) is not None:
+            result[field] = job[field]
+    if job.get("stop_on_terminal_signal"):
+        result["stop_on_terminal_signal"] = True
     return result
 
 
@@ -677,6 +682,10 @@ def cronjob(
     workdir: Optional[str] = None,
     no_agent: Optional[bool] = None,
     attach_to_session: Optional[bool] = None,
+    max_turns: Optional[int] = None,
+    max_tool_calls: Optional[int] = None,
+    wall_timeout_seconds: Optional[int] = None,
+    stop_on_terminal_signal: Optional[bool] = None,
     task_id: str = None,
 ) -> str:
     """Unified cron job management tool."""
@@ -750,6 +759,10 @@ def cronjob(
                 workdir=_normalize_optional_job_value(workdir),
                 no_agent=_no_agent,
                 attach_to_session=attach_to_session,
+                max_turns=max_turns,
+                max_tool_calls=max_tool_calls,
+                wall_timeout_seconds=wall_timeout_seconds,
+                stop_on_terminal_signal=bool(stop_on_terminal_signal),
             )
             _notify_provider_jobs_changed_safe()
             _create_message = f"Cron job '{job['name']}' created."
@@ -947,6 +960,16 @@ def cronjob(
                             success=False,
                         )
                 updates["no_agent"] = target_no_agent
+            if max_turns is not None:
+                updates["max_turns"] = max_turns
+            if max_tool_calls is not None:
+                updates["max_tool_calls"] = max_tool_calls
+            if wall_timeout_seconds is not None:
+                updates["wall_timeout_seconds"] = wall_timeout_seconds
+            if stop_on_terminal_signal is not None:
+                updates["stop_on_terminal_signal"] = bool(
+                    stop_on_terminal_signal
+                )
             if repeat is not None:
                 # Normalize: treat 0 or negative as None (infinite)
                 normalized_repeat = None if repeat <= 0 else repeat
@@ -1091,6 +1114,26 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
                 "type": "boolean",
                 "description": "When True, this job becomes CONTINUABLE: the user can reply to its delivery and the agent has the brief in context instead of asking 'what is that?'. On thread-capable platforms (Telegram topics, Discord/Slack threads) a dedicated thread is opened for the job and its replies; on DM-only platforms (WhatsApp/Signal) the brief is mirrored into the origin DM session. Use this for conversational recurring jobs the user will reply to — daily briefings, reminders that kick off follow-up work. Leave unset for fire-and-forget alerts/watchdogs. Overrides the global cron.mirror_delivery config for this one job. Only the origin chat is touched (never fan-out targets); no effect when deliver='local'."
             },
+            "max_turns": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Optional hard limit on model turns for one run. Use a small explicit value for bounded autonomous work."
+            },
+            "max_tool_calls": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Optional hard limit on executed model tool calls for one run. Tool execution is serialized when set so the limit cannot be exceeded by a parallel batch."
+            },
+            "wall_timeout_seconds": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Optional hard wall-clock limit for one run, independent of the existing inactivity timeout."
+            },
+            "stop_on_terminal_signal": {
+                "type": "boolean",
+                "default": False,
+                "description": "Stop the agent successfully when a tool returns a validated _hermes record-attempt terminal signal. Enable only for a job whose worker implements that contract."
+            },
         },
         "required": ["action"]
     }
@@ -1146,6 +1189,10 @@ registry.register(
         enabled_toolsets=args.get("enabled_toolsets"),
         workdir=args.get("workdir"),
         no_agent=args.get("no_agent"),
+        max_turns=args.get("max_turns"),
+        max_tool_calls=args.get("max_tool_calls"),
+        wall_timeout_seconds=args.get("wall_timeout_seconds"),
+        stop_on_terminal_signal=args.get("stop_on_terminal_signal"),
         task_id=kw.get("task_id"),
     ))(),
     check_fn=check_cronjob_requirements,

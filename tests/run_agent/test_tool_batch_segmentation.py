@@ -344,6 +344,20 @@ class TestSegmentedDispatchIntegration:
         seq.assert_called_once()
         conc.assert_not_called()
 
+    def test_run_supervisor_can_force_safe_batch_onto_sequential_path(self, agent):
+        calls = [_tc("web_search"), _tc("web_search")]
+        msg = SimpleNamespace(content="", tool_calls=calls)
+        agent._force_sequential_tool_calls = True
+
+        with (
+            patch.object(agent, "_execute_tool_calls_concurrent") as conc,
+            patch.object(agent, "_execute_tool_calls_sequential") as seq,
+        ):
+            agent._execute_tool_calls(msg, [], "task-1")
+
+        seq.assert_called_once()
+        conc.assert_not_called()
+
     def test_interrupt_during_barrier_drains_later_segments(self, agent):
         """Interrupt raised while the barrier tool runs: the trailing parallel
         segment must be drained with cancelled results — one per call —

@@ -1213,6 +1213,10 @@ def create_job(
     workdir: Optional[str] = None,
     no_agent: bool = False,
     attach_to_session: Optional[bool] = None,
+    max_turns: Optional[int] = None,
+    max_tool_calls: Optional[int] = None,
+    wall_timeout_seconds: Optional[int] = None,
+    stop_on_terminal_signal: bool = False,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -1257,6 +1261,11 @@ def create_job(
                 and deliver its stdout directly. Empty stdout = silent (no
                 delivery). Requires ``script`` to be set. Ideal for classic
                 watchdogs and periodic alerts that don't need LLM reasoning.
+        max_turns: Optional maximum model turns for this job's agent run.
+        max_tool_calls: Optional maximum executed model tool calls per run.
+        wall_timeout_seconds: Optional hard wall-clock limit for one run.
+        stop_on_terminal_signal: Stop successfully when a tool returns the
+                reserved, validated terminal-result signal.
 
     Returns:
         The created job dict
@@ -1289,6 +1298,14 @@ def create_job(
     normalized_workdir = _normalize_workdir(workdir)
     normalized_no_agent = bool(no_agent)
     normalized_attach = attach_to_session if isinstance(attach_to_session, bool) else None
+    from cron.run_limits import optional_positive_int
+    normalized_max_turns = optional_positive_int(max_turns, "max_turns")
+    normalized_max_tool_calls = optional_positive_int(
+        max_tool_calls, "max_tool_calls"
+    )
+    normalized_wall_timeout = optional_positive_int(
+        wall_timeout_seconds, "wall_timeout_seconds"
+    )
 
     # no_agent jobs are meaningless without a script — the script IS the job.
     # Surface this as a clear ValueError at create time so bad configs never
@@ -1384,6 +1401,14 @@ def create_job(
     # global cron.mirror_delivery config, default off).
     if normalized_attach is not None:
         job["attach_to_session"] = normalized_attach
+    if normalized_max_turns is not None:
+        job["max_turns"] = normalized_max_turns
+    if normalized_max_tool_calls is not None:
+        job["max_tool_calls"] = normalized_max_tool_calls
+    if normalized_wall_timeout is not None:
+        job["wall_timeout_seconds"] = normalized_wall_timeout
+    if stop_on_terminal_signal:
+        job["stop_on_terminal_signal"] = True
 
     with _jobs_lock():
         jobs = load_jobs()
@@ -1481,6 +1506,20 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
                     updates["workdir"] = None
                 else:
                     updates["workdir"] = _normalize_workdir(_wd)
+
+            from cron.run_limits import optional_positive_int
+            for field in ("max_turns", "max_tool_calls", "wall_timeout_seconds"):
+                if field not in updates:
+                    continue
+                value = updates[field]
+                updates[field] = (
+                    None if value in (None, "")
+                    else optional_positive_int(value, field)
+                )
+            if "stop_on_terminal_signal" in updates:
+                updates["stop_on_terminal_signal"] = bool(
+                    updates["stop_on_terminal_signal"]
+                )
 
             previous_inference_axes = _normalized_inference_axes(job)
             updated = _apply_skill_fields({**job, **updates})

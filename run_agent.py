@@ -6672,6 +6672,11 @@ class AIAgent:
                     assistant_message, messages, effective_task_id, api_call_count
                 )
 
+            if getattr(self, "_force_sequential_tool_calls", False):
+                return self._execute_tool_calls_sequential(
+                    assistant_message, messages, effective_task_id, api_call_count
+                )
+
             from agent.tool_dispatch_helpers import _plan_tool_batch_segments
             _active_env = get_active_env(effective_task_id)
             _exec_cwd = Path(_active_env.cwd) if _active_env is not None and _active_env.cwd else None
