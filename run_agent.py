@@ -4470,6 +4470,13 @@ class AIAgent:
 
     def _create_openai_client(self, client_kwargs: dict, *, reason: str, shared: bool) -> Any:
         """Forwarder — see ``agent.agent_runtime_helpers.create_openai_client``."""
+        # FORK-LOCAL (ilyasst): stamp caproute attribution here rather than
+        # in `_apply_client_headers_for_base_url`, which is only reached on
+        # credential-refresh paths — a normal run never calls it, so headers
+        # added there never left the process. This is the single
+        # `OpenAI(**client_kwargs)` call site, so every client gets them
+        # however it was built.
+        client_kwargs = self._with_caproute_attribution(client_kwargs)
         from agent.agent_runtime_helpers import create_openai_client
         return create_openai_client(self, client_kwargs, reason=reason, shared=shared)
 
@@ -5104,58 +5111,15 @@ class AIAgent:
             except Exception:
                 logger.debug("custom-provider extra_headers skipped", exc_info=True)
 
-        # FORK-LOCAL (ilyasst): demand attribution for our caproute router.
-        # Applied last so nothing above can drop it. No-op unless the
-        # environment asks for it, which keeps upstream merges clean.
-        self._apply_caproute_attribution_headers()
+    def _with_caproute_attribution(self, client_kwargs: dict) -> dict:
+        """FORK-LOCAL: see `agent.caproute_attribution`."""
+        from agent.caproute_attribution import with_attribution
+        return with_attribution(client_kwargs)
 
-    def _apply_caproute_attribution_headers(self) -> None:
-        """Say which job this agent turn belongs to, if a parent said so.
-
-        FORK-LOCAL. Our fleet routes through caproute, which records demand
-        per caller so we can decide which models each machine should run.
-        caproute can already name the *process* on the other end of the
-        socket, but not what the call was for — only the caller knows that.
-
-        foxhound spawns one `hermes chat` per task, so the job is constant
-        for the life of the process and the environment is the natural
-        channel: the parent exports CAPROUTE_* and every call this process
-        makes carries it. Nothing is invented when the parent says nothing.
-
-        Values are bounded and stripped of control characters because they
-        become HTTP headers and land in a router's log. Never message text.
-        """
-        import os as _os
-
-        fields = (
-            ("X-Caproute-Operation", "CAPROUTE_OPERATION"),
-            ("X-Caproute-Job", "CAPROUTE_JOB"),
-            ("X-Caproute-Run-Id", "CAPROUTE_RUN_ID"),
-            ("X-Caproute-Work-Item-Type", "CAPROUTE_WORK_ITEM_TYPE"),
-            ("X-Caproute-Work-Item-Id", "CAPROUTE_WORK_ITEM_ID"),
-        )
-        headers = {}
-        for header, env in fields:
-            raw = _os.environ.get(env)
-            if not raw:
-                continue
-            clean = "".join(
-                ch for ch in str(raw)
-                if ch.isprintable() and ch not in "\r\n\t"
-            ).strip()[:160]
-            if clean:
-                headers[header] = clean
-        if not headers:
-            # Absent parent context: leave the request exactly as it was.
-            # caproute's own peer lookup still identifies us as hermes.
-            return
-        headers["X-Caproute-App"] = (
-            _os.environ.get("CAPROUTE_APP") or "hermes")
-        headers["X-Caproute-Process"] = "hermes-agent"
-        headers["X-Caproute-Pid"] = str(_os.getpid())
-        existing = dict(self._client_kwargs.get("default_headers") or {})
-        existing.update(headers)
-        self._client_kwargs["default_headers"] = existing
+    def _caproute_attribution_headers(self) -> dict:
+        """FORK-LOCAL: see `agent.caproute_attribution`."""
+        from agent.caproute_attribution import headers
+        return headers()
 
     def _apply_user_default_headers(self) -> None:
         """Merge user-configured request headers onto the OpenAI client.

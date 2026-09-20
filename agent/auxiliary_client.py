@@ -211,6 +211,11 @@ def _create_openai_client(*, api_key: str, base_url: str, **kwargs: Any) -> Any:
     # by default and let Hermes control the budget; explicit callers can still
     # override via kwargs.
     kwargs.setdefault("max_retries", 0)
+    # FORK-LOCAL (ilyasst): this is the client that actually serves a chat
+    # turn. Attaching attribution only to the agent's own client left every
+    # real request unlabelled while the tests passed.
+    from agent.caproute_attribution import with_attribution
+    kwargs = with_attribution(kwargs)
     return OpenAI(api_key=api_key, base_url=base_url, **kwargs)
 
 
@@ -4809,6 +4814,9 @@ def _to_async_client(sync_client, model: str, is_vision: bool = False):
     # See _create_openai_client: disable SDK-internal retries so Hermes owns
     # the auxiliary retry/timeout budget (issue #54465).
     async_kwargs.setdefault("max_retries", 0)
+    # FORK-LOCAL (ilyasst): the async client serves turns too.
+    from agent.caproute_attribution import with_attribution
+    async_kwargs = with_attribution(async_kwargs)
     return AsyncOpenAI(**async_kwargs), model
 
 
