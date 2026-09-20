@@ -2032,6 +2032,9 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
     client_kwargs.setdefault("max_retries", 0)
     # Uses the module-level `OpenAI` name, resolved lazily on first
     # access via __getattr__ below. Tests patch via `run_agent.OpenAI`.
+    # FORK-LOCAL (ilyasst): the second of two OpenAI() call sites.
+    from agent.caproute_attribution import with_attribution
+    client_kwargs = with_attribution(client_kwargs)
     client = _ra().OpenAI(**client_kwargs)
     _ra().logger.info(
         "OpenAI client created (%s, shared=%s) %s",
