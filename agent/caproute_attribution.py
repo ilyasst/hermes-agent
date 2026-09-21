@@ -24,6 +24,8 @@ to upstream and merges stay clean.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import os
 
 #: Long enough for a uuid or a profile id, short enough that a header
@@ -39,6 +41,31 @@ _FIELDS = (
 )
 
 
+#: The auxiliary function a client is being built for, if any.
+#:
+#: Hermes already routes each function to its own capability
+#: (`auxiliary.compression`, `auxiliary.approval`, …) and already passes a
+#: `task=` name into `resolve_provider_client`. A client is built per
+#: function and reused, so the name is fixed for that client's life and
+#: belongs in its default headers rather than on each request.
+#:
+#: A ContextVar rather than a parameter because `resolve_provider_client`
+#: constructs clients down several branches — sync, async, and per-provider
+#: — and threading an argument through all of them would be easy to miss on
+#: the next one added.
+_task = contextvars.ContextVar("caproute_task", default=None)
+
+
+@contextlib.contextmanager
+def for_task(task: str | None):
+    """Name the function any client built in this block is serving."""
+    token = _task.set(task or None)
+    try:
+        yield
+    finally:
+        _task.reset(token)
+
+
 def _clean(value: object) -> str:
     """Bounded and printable: this becomes a header and a router log line."""
     text = "".join(
@@ -49,19 +76,38 @@ def _clean(value: object) -> str:
 
 
 def headers() -> dict[str, str]:
-    """Attribution for this process, or empty when nobody asked.
+    """Attribution for this client, or empty when nobody asked.
 
-    ``CAPROUTE_APP`` alone does not count as asking: caproute already
-    knows we are hermes, and only the job context is new information.
+    Enabled by any ``CAPROUTE_*`` variable, including ``CAPROUTE_APP``
+    alone. That is a change from the first version, which treated APP
+    alone as nothing to say because caproute can already identify the
+    process. With a task name there IS something to say that no peer
+    lookup can infer — which of the agent's functions spent the call —
+    and the gateway, being long-lived, never carries a per-job
+    environment, so APP is the only switch it can be given.
+
+    Still silent with no CAPROUTE_* set at all. That matters beyond tidy
+    merges: without a switch, a Hermes pointed at a third-party endpoint
+    would send our internal function names to it.
+
+    The task wins over the environment's operation when both exist. The
+    environment says which foxhound job spawned this process; the task
+    says what this particular client does, which is the finer and more
+    useful of the two. The job is kept separately in `X-Caproute-Job`, so
+    nothing is lost.
     """
     found = {}
     for header, variable in _FIELDS:
         cleaned = _clean(os.environ.get(variable) or "")
         if cleaned:
             found[header] = cleaned
-    if not found:
+    app = _clean(os.environ.get("CAPROUTE_APP") or "")
+    if not found and not app:
         return {}
-    found["X-Caproute-App"] = _clean(os.environ.get("CAPROUTE_APP") or "hermes")
+    task = _clean(_task.get() or "")
+    if task:
+        found["X-Caproute-Operation"] = f"aux.{task}"
+    found["X-Caproute-App"] = app or "hermes"
     found["X-Caproute-Process"] = "hermes-agent"
     found["X-Caproute-Pid"] = str(os.getpid())
     return found

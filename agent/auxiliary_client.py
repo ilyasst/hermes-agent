@@ -4874,6 +4874,32 @@ def resolve_provider_client(
     Returns:
         (client, resolved_model) or (None, None) if auth is unavailable.
     """
+    # FORK-LOCAL (ilyasst): name the function every client built below is
+    # serving, so caproute can tell compression from approval from a
+    # reasoning turn. Wrapped around the whole body rather than passed
+    # down, because clients are constructed on several branches here and
+    # an argument would be missed by the next branch added.
+    from agent.caproute_attribution import for_task
+    with for_task(task):
+        return _resolve_provider_client_inner(
+            provider, model, async_mode, raw_codex, explicit_base_url,
+            explicit_api_key, api_mode, main_runtime, is_vision, task,
+        )
+
+
+def _resolve_provider_client_inner(
+    provider: str,
+    model: str = None,
+    async_mode: bool = False,
+    raw_codex: bool = False,
+    explicit_base_url: str = None,
+    explicit_api_key: str = None,
+    api_mode: str = None,
+    main_runtime=None,
+    is_vision: bool = False,
+    task=None,
+):
+    """FORK-LOCAL split: the original body of `resolve_provider_client`."""
     _validate_proxy_env_urls()
     # Preserve the original provider name before alias normalization so a
     # user-declared ``custom_providers`` entry whose name coincidentally

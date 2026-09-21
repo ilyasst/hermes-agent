@@ -91,9 +91,19 @@ class CaprouteAttributionTests(unittest.TestCase):
     def test_an_empty_value_is_not_a_request_for_headers(self):
         self.assertIsNone(_apply(_Stub(), {"CAPROUTE_OPERATION": "   "}))
 
-    def test_app_alone_does_not_trigger_stamping(self):
-        """caproute already knows we are hermes; only context is new."""
-        self.assertIsNone(_apply(_Stub(), {"CAPROUTE_APP": "foxhound"}))
+    def test_app_alone_switches_stamping_on(self):
+        """Reversed deliberately when task attribution arrived.
+
+        It used to be a no-op: caproute can identify the process, so the
+        app name added nothing. With a task name there IS something no
+        peer lookup can infer, and the long-lived gateway never carries a
+        per-job environment — APP is the only switch it can be given.
+        """
+        got = _apply(_Stub(), {"CAPROUTE_APP": "foxhound"})
+        self.assertEqual(got["X-Caproute-App"], "foxhound")
+        # Still nothing invented for the fields only a caller could know.
+        self.assertNotIn("X-Caproute-Run-Id", got)
+        self.assertNotIn("X-Caproute-Operation", got)
 
     def test_every_field_maps_to_its_header(self):
         got = _apply(_Stub(), {
@@ -166,6 +176,86 @@ class ClientConstructionTests(unittest.TestCase):
             got = stub._with_caproute_attribution(original)
         self.assertNotIn("default_headers", original)
         self.assertIn("X-Caproute-Run-Id", got["default_headers"])
+
+
+class TaskAttributionTests(unittest.TestCase):
+    """Which of the agent's functions spent the call.
+
+    Hermes routes each function to its own capability and already passes
+    a `task=` name into `resolve_provider_client`. caproute's peer lookup
+    can name the process but never the function, so this is the only
+    source for it — and the function is the unit a model would be
+    assigned to, since every turn in one conversation shares a client.
+    """
+
+    def _headers(self, task=None, env=None):
+        from agent.caproute_attribution import for_task, headers
+        env = env or {}
+        with mock.patch.dict(os.environ, env, clear=False):
+            for key in ("CAPROUTE_OPERATION", "CAPROUTE_JOB",
+                        "CAPROUTE_RUN_ID", "CAPROUTE_WORK_ITEM_TYPE",
+                        "CAPROUTE_WORK_ITEM_ID", "CAPROUTE_APP"):
+                if key not in env:
+                    os.environ.pop(key, None)
+            with for_task(task):
+                return headers()
+
+    def test_a_task_names_the_operation(self):
+        got = self._headers("compression", {"CAPROUTE_APP": "hermes"})
+        self.assertEqual(got["X-Caproute-Operation"], "aux.compression")
+
+    def test_app_alone_now_switches_stamping_on(self):
+        """Changed deliberately: with a task there is something to say."""
+        self.assertTrue(self._headers("approval", {"CAPROUTE_APP": "hermes"}))
+
+    def test_still_silent_with_no_caproute_env_at_all(self):
+        """A Hermes pointed at a third party must not leak function names."""
+        self.assertEqual(self._headers("compression", {}), {})
+
+    def test_the_task_beats_the_environment_operation(self):
+        got = self._headers("compression", {"CAPROUTE_OPERATION": "execution",
+                                            "CAPROUTE_JOB": "prof"})
+        self.assertEqual(got["X-Caproute-Operation"], "aux.compression")
+        # The job context is kept, so nothing is lost by the override.
+        self.assertEqual(got["X-Caproute-Job"], "prof")
+
+    def test_without_a_task_the_environment_operation_stands(self):
+        got = self._headers(None, {"CAPROUTE_OPERATION": "execution"})
+        self.assertEqual(got["X-Caproute-Operation"], "execution")
+
+    def test_the_task_does_not_leak_out_of_its_block(self):
+        from agent.caproute_attribution import for_task, headers
+        with mock.patch.dict(os.environ, {"CAPROUTE_APP": "hermes"},
+                             clear=False):
+            with for_task("compression"):
+                pass
+            self.assertNotIn("X-Caproute-Operation", headers())
+
+    def test_nested_tasks_restore_the_outer_one(self):
+        from agent.caproute_attribution import for_task, headers
+        with mock.patch.dict(os.environ, {"CAPROUTE_APP": "hermes"},
+                             clear=False):
+            with for_task("compression"):
+                with for_task("vision"):
+                    self.assertEqual(headers()["X-Caproute-Operation"],
+                                     "aux.vision")
+                self.assertEqual(headers()["X-Caproute-Operation"],
+                                 "aux.compression")
+
+    def test_a_task_is_sanitised_like_any_other_value(self):
+        got = self._headers("comp\r\nX-Injected: yes",
+                            {"CAPROUTE_APP": "hermes"})
+        self.assertNotIn("\r", got["X-Caproute-Operation"])
+        self.assertNotIn("\n", got["X-Caproute-Operation"])
+
+    def test_the_resolver_wraps_its_whole_body_in_the_task(self):
+        """Every construction branch inside must inherit it."""
+        import inspect
+        from agent import auxiliary_client
+        source = inspect.getsource(auxiliary_client.resolve_provider_client)
+        self.assertIn("for_task(task)", source)
+        self.assertIn("_resolve_provider_client_inner", source)
+
 
 
 if __name__ == "__main__":
