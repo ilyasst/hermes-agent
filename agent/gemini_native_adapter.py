@@ -683,7 +683,7 @@ def translate_stream_event(event: Dict[str, Any], model: str, tool_call_indices:
     parts = ((cand.get("content") or {}).get("parts") or []) if isinstance(cand, dict) else []
     chunks: List[_GeminiStreamChunk] = []
 
-    for part_index, part in enumerate(parts):
+    for part in parts:
         if not isinstance(part, dict):
             continue
         if part.get("thought") is True and isinstance(part.get("text"), str):
@@ -698,31 +698,14 @@ def translate_stream_event(event: Dict[str, Any], model: str, tool_call_indices:
                 args_str = json.dumps(fc.get("args") or {}, ensure_ascii=False, sort_keys=True)
             except (TypeError, ValueError):
                 args_str = "{}"
-            thought_signature = part.get("thoughtSignature") if isinstance(part.get("thoughtSignature"), str) else ""
-            call_key = json.dumps(
-                {
-                    "part_index": part_index,
-                    "name": name,
-                    "thought_signature": thought_signature,
-                },
-                sort_keys=True,
-            )
-            slot = tool_call_indices.get(call_key)
-            if slot is None:
-                slot = {
-                    "index": len(tool_call_indices),
-                    "id": f"call_{uuid.uuid4().hex[:12]}",
-                    "last_arguments": "",
-                }
-                tool_call_indices[call_key] = slot
-            emitted_arguments = args_str
-            last_arguments = str(slot.get("last_arguments") or "")
-            if last_arguments:
-                if args_str == last_arguments:
-                    emitted_arguments = ""
-                elif args_str.startswith(last_arguments):
-                    emitted_arguments = args_str[len(last_arguments):]
-            slot["last_arguments"] = args_str
+            # Native functionCall parts contain complete argument objects;
+            # partial-argument streaming is not enabled by this adapter.
+            # Part positions restart in every SSE event, and neither names
+            # nor optional thought signatures identify a call across events.
+            # Allocate once per completed part, including identical calls.
+            call_id = f"call_{uuid.uuid4().hex[:12]}"
+            slot = {"index": len(tool_call_indices), "id": call_id}
+            tool_call_indices[call_id] = slot
             chunks.append(
                 _make_stream_chunk(
                     model=model,
@@ -730,7 +713,7 @@ def translate_stream_event(event: Dict[str, Any], model: str, tool_call_indices:
                         "index": slot["index"],
                         "id": slot["id"],
                         "name": name,
-                        "arguments": emitted_arguments,
+                        "arguments": args_str,
                         "extra_content": _tool_call_extra_from_part(part),
                     },
                 )
