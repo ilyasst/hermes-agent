@@ -405,7 +405,7 @@ async def test_async_native_client_streams_without_requiring_async_iterator_from
     assert collected == [chunk]
 
 
-def test_stream_event_translation_emits_tool_call_delta_with_stable_index():
+def test_stream_event_translation_keeps_complete_calls_in_distinct_events():
     from agent.gemini_native_adapter import translate_stream_event
 
     tool_call_indices = {}
@@ -426,10 +426,10 @@ def test_stream_event_translation_emits_tool_call_delta_with_stable_index():
     second = translate_stream_event(event, model="gemini-2.5-flash", tool_call_indices=tool_call_indices)
 
     assert first[0].choices[0].delta.tool_calls[0].index == 0
-    assert second[0].choices[0].delta.tool_calls[0].index == 0
-    assert first[0].choices[0].delta.tool_calls[0].id == second[0].choices[0].delta.tool_calls[0].id
+    assert second[0].choices[0].delta.tool_calls[0].index == 1
+    assert first[0].choices[0].delta.tool_calls[0].id != second[0].choices[0].delta.tool_calls[0].id
     assert first[0].choices[0].delta.tool_calls[0].function.arguments == '{"q": "abc"}'
-    assert second[0].choices[0].delta.tool_calls[0].function.arguments == ""
+    assert second[0].choices[0].delta.tool_calls[0].function.arguments == '{"q": "abc"}'
     assert first[-1].choices[0].finish_reason == "tool_calls"
 
 
