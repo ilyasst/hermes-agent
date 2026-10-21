@@ -409,7 +409,7 @@ def test_stream_event_translation_keeps_complete_calls_in_distinct_events():
     from agent.gemini_native_adapter import translate_stream_event
 
     tool_call_indices = {}
-    event = {
+    event1 = {
         "candidates": [
             {
                 "content": {
@@ -421,16 +421,40 @@ def test_stream_event_translation_keeps_complete_calls_in_distinct_events():
             }
         ]
     }
+    event2 = {
+        "candidates": [
+            {
+                "content": {
+                    "parts": [
+                        {"functionCall": {"name": "search", "args": {"q": "def"}}}
+                    ]
+                },
+                "finishReason": "STOP",
+            }
+        ]
+    }
 
-    first = translate_stream_event(event, model="gemini-2.5-flash", tool_call_indices=tool_call_indices)
-    second = translate_stream_event(event, model="gemini-2.5-flash", tool_call_indices=tool_call_indices)
+    first = translate_stream_event(event1, model="gemini-2.5-flash", tool_call_indices=tool_call_indices)
+    second = translate_stream_event(event1, model="gemini-2.5-flash", tool_call_indices=tool_call_indices)
+    third = translate_stream_event(event2, model="gemini-2.5-flash", tool_call_indices=tool_call_indices)
 
     assert first[0].choices[0].delta.tool_calls[0].index == 0
     assert second[0].choices[0].delta.tool_calls[0].index == 1
-    assert first[0].choices[0].delta.tool_calls[0].id != second[0].choices[0].delta.tool_calls[0].id
+    assert third[0].choices[0].delta.tool_calls[0].index == 2
+    
+    id1 = first[0].choices[0].delta.tool_calls[0].id
+    id2 = second[0].choices[0].delta.tool_calls[0].id
+    id3 = third[0].choices[0].delta.tool_calls[0].id
+    
+    assert len({id1, id2, id3}) == 3
+    
     assert first[0].choices[0].delta.tool_calls[0].function.arguments == '{"q": "abc"}'
     assert second[0].choices[0].delta.tool_calls[0].function.arguments == '{"q": "abc"}'
+    assert third[0].choices[0].delta.tool_calls[0].function.arguments == '{"q": "def"}'
+    
     assert first[-1].choices[0].finish_reason == "tool_calls"
+    assert second[-1].choices[0].finish_reason == "tool_calls"
+    assert third[-1].choices[0].finish_reason == "tool_calls"
 
 
 def test_stream_event_translation_keeps_identical_calls_in_distinct_parts():
