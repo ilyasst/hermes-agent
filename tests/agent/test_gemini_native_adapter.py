@@ -441,17 +441,17 @@ def test_stream_event_translation_keeps_complete_calls_in_distinct_events():
     assert first[0].choices[0].delta.tool_calls[0].index == 0
     assert second[0].choices[0].delta.tool_calls[0].index == 1
     assert third[0].choices[0].delta.tool_calls[0].index == 2
-    
+
     id1 = first[0].choices[0].delta.tool_calls[0].id
     id2 = second[0].choices[0].delta.tool_calls[0].id
     id3 = third[0].choices[0].delta.tool_calls[0].id
-    
+
     assert len({id1, id2, id3}) == 3
-    
+
     assert first[0].choices[0].delta.tool_calls[0].function.arguments == '{"q": "abc"}'
     assert second[0].choices[0].delta.tool_calls[0].function.arguments == '{"q": "abc"}'
     assert third[0].choices[0].delta.tool_calls[0].function.arguments == '{"q": "def"}'
-    
+
     assert first[-1].choices[0].finish_reason == "tool_calls"
     assert second[-1].choices[0].finish_reason == "tool_calls"
     assert third[-1].choices[0].finish_reason == "tool_calls"
