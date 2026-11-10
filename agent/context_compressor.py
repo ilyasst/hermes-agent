@@ -348,6 +348,8 @@ _SUMMARY_TOKENS_CEILING = 10_000
 # call (see the no-wire-cap contract test in
 # test_compression_small_ctx_threshold_floor.py).
 _SUMMARY_INPUT_MAX_CHARS = 160_000
+# [LOCAL MOD] Characters of terminal output kept in a pruned tool-result stub.
+_TERMINAL_STUB_PREVIEW_CHARS = 200
 
 # Placeholder used when pruning old tool results
 _PRUNED_TOOL_PLACEHOLDER = "[Old tool output cleared to save context space]"
@@ -1026,6 +1028,20 @@ def _str_arg(args: dict, key: str, default: str = "") -> str:
     return str(val) if val is not None else default
 
 
+def _unpruned_tool_contents(messages: List[Dict[str, Any]]) -> Dict[str, str]:
+    """[LOCAL MOD] tool_call_id -> the tool result text before any pruning."""
+    found: Dict[str, str] = {}
+    for msg in messages:
+        if msg.get("role") != "tool":
+            continue
+        tool_id = msg.get("tool_call_id")
+        content = msg.get("content")
+        if not tool_id or not isinstance(content, str):
+            continue
+        found[tool_id] = content
+    return found
+
+
 def _summarize_tool_result(tool_name: str, tool_args: str, tool_content: str) -> str:
     """Create an informative 1-line summary of a tool call + result.
 
@@ -1073,7 +1089,23 @@ def _summarize_tool_result_unguarded(tool_name: str, tool_args: str, tool_conten
             cmd = cmd[:77] + "..."
         exit_match = re.search(r'"exit_code"\s*:\s*(-?\d+)', content)
         exit_code = exit_match.group(1) if exit_match else "?"
-        return f"[terminal] ran `{cmd}` -> exit {exit_code}, {line_count} lines output"
+        # [LOCAL MOD] Terminal results are JSON, so their newlines are escaped
+        # and the raw count always said "1 lines". Count the decoded output and
+        # keep a short preview, so a pruned result never reads as empty.
+        output = content
+        try:
+            decoded = json.loads(content)
+            if isinstance(decoded, dict) and isinstance(decoded.get("output"), str):
+                output = decoded["output"]
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+        output = output.strip()
+        line_count = output.count("\n") + 1 if output else 0
+        preview = " ".join(output.split())[:_TERMINAL_STUB_PREVIEW_CHARS]
+        if len(output) > len(preview):
+            preview += "..."
+        stub = f"[terminal] ran `{cmd}` -> exit {exit_code}, {line_count} lines output"
+        return f"{stub}: {preview}" if preview else stub
 
     if tool_name == "read_file":
         path = args.get("path", "?")
@@ -2857,6 +2889,13 @@ class ContextCompressor(ContextEngine):
             # Tool results: keep enough content for the summarizer
             if role == "tool":
                 tool_id = msg.get("tool_call_id", "")
+                # [LOCAL MOD] Phase 1 replaced old tool results with one-line
+                # stubs before this runs; summarize what the tool really
+                # returned (same per-message and total caps as before).
+                original = getattr(self, "_unpruned_tool_content", {}).get(tool_id)
+                if original is not None:
+                    content = _MEDIA_DIRECTIVE_RE.sub(
+                        "[media attachment]", _redact_compaction_text(original))
                 if len(content) > self._CONTENT_MAX:
                     content = content[:self._CONTENT_HEAD] + "\n...[truncated]...\n" + content[-self._CONTENT_TAIL:]
                 parts.append(f"[TOOL RESULT {tool_id}]: {content}")
@@ -4956,6 +4995,11 @@ This compaction should PRIORITISE preserving all information related to the focu
             return messages
 
         display_tokens = current_tokens if current_tokens else self.last_prompt_tokens or estimate_messages_tokens_rough(messages)
+
+        # [LOCAL MOD] Keep each tool result as the tool returned it, so the
+        # summary below is written from real outputs and not from the stubs
+        # Phase 1 leaves behind. Only the summarizer reads this copy.
+        self._unpruned_tool_content = _unpruned_tool_contents(messages)
 
         # Phase 1: Prune old tool results (cheap, no LLM call)
         messages, pruned_count = self._prune_old_tool_results(
