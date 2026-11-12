@@ -42,7 +42,7 @@ def _apply(stub, env):
     with mock.patch.dict(os.environ, env, clear=False):
         for key in ("CAPROUTE_OPERATION", "CAPROUTE_JOB", "CAPROUTE_RUN_ID",
                     "CAPROUTE_WORK_ITEM_TYPE", "CAPROUTE_WORK_ITEM_ID",
-                    "CAPROUTE_APP"):
+                    "CAPROUTE_APP", "CAPROUTE_CONVERSATION"):
             if key not in env:
                 os.environ.pop(key, None)
         merged = stub._with_caproute_attribution(dict(stub._client_kwargs))
@@ -194,7 +194,8 @@ class TaskAttributionTests(unittest.TestCase):
         with mock.patch.dict(os.environ, env, clear=False):
             for key in ("CAPROUTE_OPERATION", "CAPROUTE_JOB",
                         "CAPROUTE_RUN_ID", "CAPROUTE_WORK_ITEM_TYPE",
-                        "CAPROUTE_WORK_ITEM_ID", "CAPROUTE_APP"):
+                        "CAPROUTE_WORK_ITEM_ID", "CAPROUTE_APP",
+                        "CAPROUTE_CONVERSATION"):
                 if key not in env:
                     os.environ.pop(key, None)
             with for_task(task):
@@ -256,6 +257,49 @@ class TaskAttributionTests(unittest.TestCase):
         self.assertIn("for_task(task)", source)
         self.assertIn("_resolve_provider_client_inner", source)
 
+
+class ConversationAttributionTests(unittest.TestCase):
+    """One id for every call of a conversation, aux calls marked as aux."""
+
+    def _headers(self, task=None, env=None):
+        return TaskAttributionTests._headers(self, task, env)
+
+    def test_main_client_carries_the_id_and_no_role(self):
+        got = self._headers(None, {"CAPROUTE_CONVERSATION": "conv-1"})
+        self.assertEqual(got["X-Caproute-Conversation"], "conv-1")
+        self.assertNotIn("X-Caproute-Conversation-Role", got)
+
+    def test_aux_client_carries_the_same_id_and_the_aux_role(self):
+        got = self._headers("compression", {"CAPROUTE_CONVERSATION": "conv-1"})
+        self.assertEqual(got["X-Caproute-Conversation"], "conv-1")
+        self.assertEqual(got["X-Caproute-Conversation-Role"], "aux")
+        self.assertEqual(got["X-Caproute-Operation"], "aux.compression")
+
+    def test_main_stub_path_carries_the_id(self):
+        got = _apply(_Stub(), {"CAPROUTE_CONVERSATION": "conv-2"})
+        self.assertEqual(got["X-Caproute-Conversation"], "conv-2")
+        self.assertNotIn("X-Caproute-Conversation-Role", got)
+
+    def test_unset_means_no_conversation_headers(self):
+        got = self._headers("vision", {"CAPROUTE_APP": "hermes"})
+        self.assertNotIn("X-Caproute-Conversation", got)
+        self.assertNotIn("X-Caproute-Conversation-Role", got)
+
+    def test_empty_means_no_headers_at_all(self):
+        self.assertEqual(self._headers(None, {"CAPROUTE_CONVERSATION": ""}), {})
+        self.assertEqual(
+            self._headers("vision", {"CAPROUTE_CONVERSATION": "  "}), {})
+
+    def test_conversation_alone_switches_stamping_on(self):
+        got = self._headers(None, {"CAPROUTE_CONVERSATION": "c"})
+        self.assertEqual(got["X-Caproute-App"], "hermes")
+
+    def test_id_is_sanitised_and_bounded(self):
+        got = self._headers(None, {"CAPROUTE_CONVERSATION": "a\r\nX: y\tb" + "z" * 500})
+        value = got["X-Caproute-Conversation"]
+        for bad in ("\r", "\n", "\t"):
+            self.assertNotIn(bad, value)
+        self.assertEqual(len(value), 160)
 
 
 if __name__ == "__main__":
