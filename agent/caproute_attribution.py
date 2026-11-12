@@ -38,6 +38,9 @@ _FIELDS = (
     ("X-Caproute-Run-Id", "CAPROUTE_RUN_ID"),
     ("X-Caproute-Work-Item-Type", "CAPROUTE_WORK_ITEM_TYPE"),
     ("X-Caproute-Work-Item-Id", "CAPROUTE_WORK_ITEM_ID"),
+    # Opaque id shared by every call of one multi-call agent conversation,
+    # so the router can keep them on the host that already holds the context.
+    ("X-Caproute-Conversation", "CAPROUTE_CONVERSATION"),
 )
 
 
@@ -95,6 +98,11 @@ def headers() -> dict[str, str]:
     says what this particular client does, which is the finer and more
     useful of the two. The job is kept separately in `X-Caproute-Job`, so
     nothing is lost.
+
+    ``CAPROUTE_CONVERSATION`` is sent as-is (sanitised) on every client;
+    clients built for an auxiliary task also carry
+    ``X-Caproute-Conversation-Role: aux``. Hermes never announces the end
+    of a conversation; the parent process does that.
     """
     found = {}
     for header, variable in _FIELDS:
@@ -107,6 +115,11 @@ def headers() -> dict[str, str]:
     task = _clean(_task.get() or "")
     if task:
         found["X-Caproute-Operation"] = f"aux.{task}"
+    if task and "X-Caproute-Conversation" in found:
+        # Auxiliary clients (compression, titles, vision, ...) share the
+        # conversation id but are marked, so the router can tell them from
+        # the main client. The main client sends no role header.
+        found["X-Caproute-Conversation-Role"] = "aux"
     found["X-Caproute-App"] = app or "hermes"
     found["X-Caproute-Process"] = "hermes-agent"
     found["X-Caproute-Pid"] = str(os.getpid())
